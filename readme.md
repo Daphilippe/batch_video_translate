@@ -8,8 +8,8 @@ This project is a modular and scalable pipeline designed to automate the process
 * **Local Transcription**: Uses `whisper.cpp` for fast, offline, and private speech-to-text.
 * **SRT Optimization**: Advanced logic to merge identical consecutive segments and eliminate "flickering" effects.
 * **Hybrid Translation Engines**:
-* **LLM Engine**: High-quality translation via Large Language Models (e.g., Copilot via UI Automation) for better nuance.
-* **Legacy Engine**: Rapid translation using standard APIs and custom technical dictionaries.
+  * **LLM Engine**: High-quality translation via Large Language Models (e.g., Copilot via UI Automation) for better nuance.
+  * **Legacy Engine**: Rapid translation using standard APIs and custom technical dictionaries.
 
 
 * **Resilient Workspace**: Intelligent directory mirroring that allows resuming the process at any stage (Extraction, Transcription, or Translation).
@@ -25,10 +25,12 @@ project_root/
 ├── src/
 │   ├── main.py              # Main orchestrator (The Command Center)
 │   ├── modules/
+│   │   ├── translator.py    # Parent Abstract Class (BaseTranslator)
+│   │   ├── legacy_translator.py # Google Translate + Dictionary engine
+│   │   ├── llm_translator.py # Chunked LLM translation management																
 │   │   ├── extractor.py      # Audio extraction logic (FFmpeg)
 │   │   ├── transcriber.py    # Subprocess wrapper for Whisper.cpp
 │   │   ├── srt_optimizer.py  # SRT structure cleaning
-│   │   ├── llm_translator.py # Chunk-based LLM translation management
 │   │   └── providers/
 │   │       ├── base_provider.py # Abstract interface for LLMs
 │   │       └── copilot_ui.py    # UI Automation for browser-based AI
@@ -51,7 +53,7 @@ Configure your environment before launching the pipeline:
   "whisper": {
     "bin_path": "C:/path/to/whisper/whisper-cli.exe",
     "model_path": "C:/path/to/whisper/models/ggml-large-v3.bin",
-    "lang": "en"
+    "lang": "auto"
   },
   "llm_config": {
     "source_lang": "English",
@@ -59,7 +61,7 @@ Configure your environment before launching the pipeline:
     "chunk_size": 20
   },
   "technical_dictionary": {
-    "example term": "terme générique",
+    "example term": "target term",
     "industry keyword": "mot-clé métier"
   }
 }

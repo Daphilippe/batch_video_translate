@@ -10,24 +10,19 @@ class SRTOptimizer(DirectoryMirrorTask):
         super().__init__(input_dir, output_dir, extensions)
 
     def process_file(self, input_file: Path):
-        output_file = self.get_output_path(input_file, ".srt")
-        output_file.parent.mkdir(parents=True, exist_ok=True)
+            output_file = self.get_output_path(input_file, ".srt")
+            
+            with open(input_file, "r", encoding="utf-8") as f:
+                content = f.read()
 
-        with open(input_file, "r", encoding="utf-8") as f:
-            original_content = f.read()
+            # Apply the full conditioning immediately
+            standardized_content = SRTHandler.standardize(content)
 
-        # 1. Parse & Merge logic
-        blocks = SRTHandler.parse_to_blocks(original_content)
-        merged_blocks = SRTHandler.merge_identical_blocks(blocks)
-        optimized_content = SRTHandler.render_blocks(merged_blocks)
-
-        # 2. Check if anything actually changed
-        if SRTHandler.get_hash(original_content) != SRTHandler.get_hash(optimized_content):
+            logger.info(f"[STEP 3] Standardizing structure: {input_file.name}")
+            
+            output_file.parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, "w", encoding="utf-8") as f:
-                f.write(optimized_content)
-            logger.info(f"[OPTIMIZED] {input_file.name}")
-        else:
-            logger.info(f"[NO CHANGE] {input_file.name}")
+                f.write(standardized_content)
 
 if __name__ == "__main__":
     import argparse

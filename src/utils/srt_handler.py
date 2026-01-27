@@ -3,6 +3,7 @@ import hashlib
 import unicodedata
 import logging
 from pathlib import Path
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -10,8 +11,52 @@ class SRTHandler:
     TIMESTAMP_RE = re.compile(r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}")
 
     @staticmethod
+    def shift_timestamp(ts_str: str, offset_seconds: int) -> str:
+        """
+        Adds offset_seconds to an SRT timestamp string (00:00:00,000).
+        Used to realign segmented audio transcripts.
+        """
+        # Parse the HH:MM:SS,mmm format
+        match = re.match(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})", ts_str.strip())
+        if not match:
+            return ts_str
+
+        h, m, s, ms = map(int, match.groups())
+        
+        # Use timedelta for robust time math
+        td = timedelta(hours=h, minutes=m, seconds=s, milliseconds=ms)
+        new_td = td + timedelta(seconds=offset_seconds)
+        
+        # Extract new components
+        total_seconds = int(new_td.total_seconds())
+        new_h = total_seconds // 3600
+        new_m = (total_seconds % 3600) // 60
+        new_s = total_seconds % 60
+        new_ms = int(new_td.microseconds / 1000)
+        
+        return f"{new_h:02d}:{new_m:02d}:{new_s:02d},{new_ms:03d}"
+
+    @classmethod
+    def apply_offset_to_blocks(cls, blocks: list, offset_seconds: int) -> list:
+        """Applies a time offset to a list of parsed SRT blocks."""
+        if offset_seconds == 0:
+            return blocks
+            
+        valid_blocks = []
+        for b in blocks:
+            # SAFETY CHECK: Skip blocks that are missing timestamps
+            if b.get('start') is None or b.get('end') is None:
+                logger.warning(f"Skipping malformed block: {b}")
+                continue
+                
+            b['start'] = cls.shift_timestamp(b['start'], offset_seconds)
+            b['end'] = cls.shift_timestamp(b['end'], offset_seconds)
+            valid_blocks.append(b)
+        return valid_blocks
+
+    @staticmethod
     def clean_text(text: str) -> str:
-        replacements = {"**": "", "": "", "□": "-", "▪": "-", "…": "..."}
+        replacements = {"**": "", "□": "-", "▪": "-", "…": "..."}
         for bad, good in replacements.items():
             text = text.replace(bad, good)
         return " ".join(text.split()).strip()
@@ -67,6 +112,9 @@ class SRTHandler:
     @staticmethod
     def parse_to_blocks(content: str) -> list:
         """Parses SRT content with aggressive cleaning of LLM artifacts."""
+        content = re.sub(r"```[a-z]*", "", content)
+        content = content.replace("```", "")
+        
         blocks = []
         current = {"index": None, "start": None, "end": None, "text": []}
 
@@ -75,28 +123,26 @@ class SRTHandler:
             if not line:
                 continue
 
-            # 1. Match Index
             if re.match(r"^\d+$", line):
-                if current["index"] is not None:
+                if current["index"] is not None and current["start"] is not None:
                     blocks.append(current)
                 current = {"index": int(line), "start": None, "end": None, "text": []}
 
-            # 2. Match Timestamps
             elif "-->" in line:
                 times = [x.strip() for x in line.split("-->")]
                 if len(times) == 2:
                     current["start"], current["end"] = times[0], times[1]
 
-            # 3. Match Text (The problematic part)
             else:
-                # CLEANING: Remove typical LLM artifacts like ["text"] or ['text']
-                # This regex removes leading/trailing brackets and quotes
-                clean_line = re.sub(r"^['\"\[\s]+|['\"\]\s]+$", "", line)
-                
-                if clean_line:
-                    current["text"].append(clean_line)
+                if current["start"] is not None:
+                    clean_line = re.sub(r"^['\"\[\s]+|['\"\]\s]+$", "", line)
+                    if clean_line:
+                        current["text"].append(clean_line)
+                else:
+                    pass
 
-        if current["index"] is not None:
+        # Final check
+        if current["index"] is not None and current["start"] is not None:
             blocks.append(current)
             
         return blocks
@@ -108,7 +154,7 @@ class SRTHandler:
         prev = None
 
         for b in blocks:
-            text = "\n".join(b["text"]).strip()
+            text = "\n".join(b["text"]).strip() if isinstance(b["text"], list) else b["text"]
             if prev and text == prev["text"]:
                 prev["end"] = b["end"]
             else:
@@ -118,10 +164,9 @@ class SRTHandler:
 
     @staticmethod
     def render_blocks(blocks: list) -> str:
-        """Converts blocks back into a valid SRT string, ensuring text is a string."""
+        """Converts blocks back into a valid SRT string."""
         out = []
         for i, b in enumerate(blocks, start=1):
-            # Ensure text is joined properly and NOT a string representation of a list
             if isinstance(b['text'], list):
                 text_content = "\n".join(b['text']).strip()
             else:
@@ -130,6 +175,30 @@ class SRTHandler:
             out.append(f"{i}")
             out.append(f"{b['start']} --> {b['end']}")
             out.append(text_content)
-            out.append("") # Empty line between blocks
+            out.append("") 
             
         return "\n".join(out)
+        
+    @classmethod
+    def standardize(cls, content: str) -> str:
+        """
+        Full post-processing pipeline:
+        Parse -> Merge Identical -> Clean Empty -> Re-index -> Render
+        """
+        # 1. Parse raw string to blocks
+        blocks = cls.parse_to_blocks(content)
+        
+        # 2. Merge consecutive blocks with same text
+        merged = cls.merge_identical_blocks(blocks)
+        
+        # 3. Remove blocks with no text or invalid data
+        cleaned = []
+        for b in merged:
+            text_content = "".join(b['text']).strip() if isinstance(b['text'], list) else str(b['text']).strip()
+            if b.get('start') and b.get('end') and text_content:
+                # Ensure text is stored as a clean string for final rendering
+                b['text'] = text_content
+                cleaned.append(b)
+        
+        # 4. Render back to string with fresh indexing (1, 2, 3...)
+        return cls.render_blocks(cleaned)

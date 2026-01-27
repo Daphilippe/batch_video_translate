@@ -11,31 +11,34 @@ logger = logging.getLogger(__name__)
 
 class LegacyTranslator(BaseTranslator):
     def __init__(self, input_dir, output_dir, config_path="configs/settings.json"):
-        # Chargement de la config
+        # Load Config
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
         
+        # Initialize parent with None for bot because deep_translator is a library, not a bot
         super().__init__(input_dir, output_dir, None, extensions=(".srt",))
         
-        # Initialisation du traducteur
         self.translator = GoogleTranslator(
             source=self.config["translation"]["source_lang"], 
             target=self.config["translation"]["target_lang"]
         )
         
-        # Préparation du dictionnaire (trié par longueur décroissante)
-        raw_dict = self.config["technical_dictionary"]
+        # Dictionary preparation
+        raw_dict = self.config.get("technical_dictionary", {})
         self.tech_dict = sorted(raw_dict.items(), key=lambda x: len(x[0]), reverse=True)
         
-        # Gestion du cache
+        # Cache management
         self.cache_path = Path(self.config["translation"]["cache_file"])
         self.cache = self._load_cache()
-        self.name="Legacy translation"
+        self.name = "Legacy translation"
 
     def _load_cache(self):
         if self.cache_path.exists():
-            with open(self.cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open(self.cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load cache: {e}")
         return {}
 
     def save_cache(self):
@@ -44,14 +47,13 @@ class LegacyTranslator(BaseTranslator):
             json.dump(self.cache, f, ensure_ascii=False, indent=2)
 
     def _apply_dictionary(self, text: str) -> str:
-        """Applique les termes techniques avant traduction."""
         t = text.lower()
         for key, val in self.tech_dict:
-            t = t.replace(key, f"({val})")
+            t = t.replace(key.lower(), f"({val})")
         return t
 
     def _safe_translate_batch(self, batch: list) -> list:
-        """Traduction sécurisée avec gestion du rate-limit (429)."""
+        """Secure translation with rate-limit (429) handling."""
         query = " ||| ".join(batch)
         try:
             result = self.translator.translate(query)
@@ -59,7 +61,7 @@ class LegacyTranslator(BaseTranslator):
             return [res.strip() for res in result.split(" ||| ")]
         except Exception as e:
             if "429" in str(e):
-                delay = self.config["translation"]["retry_delay"]
+                delay = self.config["translation"].get("retry_delay", 30)
                 logger.warning(f"Rate limit hit. Waiting {delay}s...")
                 time.sleep(delay)
                 return self._safe_translate_batch(batch)
@@ -67,12 +69,12 @@ class LegacyTranslator(BaseTranslator):
             return []
 
     def translate_logic(self, text: str):
-        """Découpe le SRT, vérifie le cache et traduit par batchs."""
+        """Processes SRT text, checks line-cache, and translates in batches."""
         lines = text.splitlines()
         final_lines = []
-        to_translate = [] # Liste de (index_dans_final_lines, texte_a_traduire, hash)
+        to_translate = [] 
 
-        # 1. Analyse du fichier et vérification du cache
+        # 1. Analyze file and check line-cache
         for line in lines:
             clean = line.strip()
             if clean.isdigit() or "-->" in clean or not clean:
@@ -84,11 +86,11 @@ class LegacyTranslator(BaseTranslator):
                 else:
                     pre_treated = self._apply_dictionary(clean)
                     to_translate.append((len(final_lines), pre_treated, l_hash))
-                    final_lines.append(None) # Placeholder
+                    final_lines.append(None) 
 
-        # 2. Traduction par batchs pour respecter les limites
+        # 2. Batch translation
         i = 0
-        max_chars = self.config["translation"]["max_chars_batch"]
+        max_chars = self.config["translation"].get("max_chars_batch", 2000)
         while i < len(to_translate):
             current_batch, current_meta, current_len = [], [], 0
             
@@ -101,10 +103,14 @@ class LegacyTranslator(BaseTranslator):
             
             if current_batch:
                 results = self._safe_translate_batch(current_batch)
-                for (idx, h), res in zip(current_meta, results):
-                    final_lines[idx] = res
-                    self.cache[h] = res
+                # Safeguard: if batch fails, results might be empty
+                if results and len(results) == len(current_batch):
+                    for (idx, h), res in zip(current_meta, results):
+                        final_lines[idx] = res
+                        self.cache[h] = res
+                    self.save_cache() # Save cache frequently in case of crash
                 
-                time.sleep(random.uniform(1.2, 2.5)) # Simulation humaine
+                time.sleep(random.uniform(1.2, 2.5)) 
 
         return "\n".join([l if l is not None else "..." for l in final_lines])
+

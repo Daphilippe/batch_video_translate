@@ -76,32 +76,3 @@ class LLMTranslator(BaseTranslator):
         # 5. Final Rendering
         return SRTHandler.render_blocks(translated_full_blocks)
 
-    def process_file(self, input_file: Path):
-        """Overrides the parent process to add file-specific logging."""
-        output_file = self.get_output_path(input_file, ".srt")
-        
-        # Check if already done (Timestamp comparison)
-        if output_file.exists():
-            if SRTHandler.extract_timestamps(input_file) == SRTHandler.extract_timestamps(output_file):
-                logger.info(f"Subtitles already translated: {output_file.name}")
-                return
-
-        with open(input_file, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        start_time = time.time()
-        translated_srt = self.translate_logic(content)
-        
-        # Final formatting cleanup
-        optimized_srt = SRTHandler.render_blocks(
-            SRTHandler.merge_identical_blocks(
-                SRTHandler.parse_to_blocks(translated_srt)
-            )
-        )
-
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(optimized_srt)
-
-        duration = (time.time() - start_time) / 60
-        logger.info(f"Successfully translated {input_file.name} in {duration:.2f} minutes.")

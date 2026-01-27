@@ -32,23 +32,23 @@ class VideoTranslationPipeline:
         self.final_output = Path(output_dir)
         self.work_dir = self.final_output / "internals"
 
+        # Define directory structure
         self.dirs = {
-            "audio": self.work_dir / "1_audio",
+            "audio": self.work_dir / "1_audio",      # Now contains FOLDERS of segments
             "raw_srt": self.work_dir / "2_raw_srt",
             "clean_srt": self.work_dir / "3_clean_srt",
             "final": self.final_output / "subtitles_ready"
         }
         
-        # Create directories immediately
         for name, path in self.dirs.items():
-            if not path.exists():
-                logger.info(f"Creating directory: {path}")
-                path.mkdir(parents=True, exist_ok=True)
+            path.mkdir(parents=True, exist_ok=True)
 
     def _get_file_count(self, path, extension):
-        """Helper to count files for progress tracking."""
+        """Helper to count files or directories for progress tracking."""
         if not path.exists(): return 0
-        return len([f for f in os.listdir(path) if f.lower().endswith(extension)])
+        if extension == "dir":
+            return len([d for d in path.iterdir() if d.is_dir()])
+        return len([f for f in path.iterdir() if f.suffix.lower() in extension])
 
     def run(self, input_dir, mode="full", engine="llm"):
         input_path = Path(input_dir)
@@ -56,56 +56,64 @@ class VideoTranslationPipeline:
             logger.error(f"Input directory not found: {input_path}")
             return
 
-        logger.info(f"Starting pipeline in '{mode}' mode using '{engine}' engine.")
-        logger.info(f"Source folder: {input_path.absolute()}")
-        logger.info(f"Output folder: {self.final_output.absolute()}")
+        # Get segment_time from config or default to 10 mins (600s)
+        seg_time = self.config.get("whisper", {}).get("segment_time", 600)
 
-        # --- STEP 1: AUDIO EXTRACTION ---
+        logger.info(f"Starting pipeline in '{mode}' mode using '{engine}' engine.")
+        logger.info(f"Segmentation Interval: {seg_time}s")
+
+        # --- STEP 1: AUDIO EXTRACTION (SEGMENTED) ---
         if mode in ["full", "extract"]:
-            video_count = self._get_file_count(input_path, (".mp4", ".mkv", ".avi", ".mov"))
+            video_extensions = (".mp4", ".mkv", ".avi", ".mov")
+            video_count = self._get_file_count(input_path, video_extensions)
             logger.info(f"Step 1/4: Audio Extraction | Found {video_count} videos.")
             
             extractor = AudioExtractor(
                 input_dir=str(input_path),
-                output_dir=str(self.dirs["audio"])
+                output_dir=str(self.dirs["audio"]),
+                segment_time=seg_time
             )
             extractor.run()
             logger.info("Step 1/4: Completed successfully.")
 
-        # --- STEP 2: TRANSCRIPTION ---
+        # --- STEP 2: TRANSCRIPTION (MERGED SEGMENTS) ---
         if mode in ["full", "transcribe"]:
-            audio_count = self._get_file_count(self.dirs["audio"], ".wav")
-            logger.info(f"Step 2/4: Transcription (Whisper) | Processing {audio_count} audio files.")
+            # We count folders in 1_audio (one folder per video)
+            folder_count = self._get_file_count(self.dirs["audio"], "dir")
+            logger.info(f"Step 2/4: Transcription | Processing {folder_count} video folders.")
             
             transcriber = WhisperTranscriber(
                 input_dir=str(self.dirs["audio"]),
                 output_dir=str(self.dirs["raw_srt"]),
                 whisper_bin=self.config["whisper"]["bin_path"],
                 model_path=self.config["whisper"]["model_path"],
-                lang=self.config["whisper"].get("lang", "auto")
+                lang=self.config["whisper"].get("lang", "auto"),
+                segment_time=seg_time
             )
+            # This will generate: internals/2_raw_srt/VideoName.srt
             transcriber.run()
-            logger.info("Step 2/4: Completed successfully.")
+            logger.info("Step 2/4: Completed. Merged SRTs are in 2_raw_srt.")
 
         # --- STEP 3: OPTIMIZATION ---
         if mode in ["full", "optimize"]:
-            raw_srt_count = self._get_file_count(self.dirs["raw_srt"], ".srt")
-            logger.info(f"Step 3/4: SRT Optimization | Merging duplicates in {raw_srt_count} files.")
+            # IMPORTANT: Optimization reads the SINGLE merged files from Step 2
+            raw_srt_count = self._get_file_count(self.dirs["raw_srt"], (".srt",))
+            logger.info(f"Step 3/4: SRT Optimization | Processing {raw_srt_count} merged files.")
             
             optimizer = SRTOptimizer(
                 input_dir=str(self.dirs["raw_srt"]),
                 output_dir=str(self.dirs["clean_srt"])
             )
+            # This reads 2_raw_srt/VideoName.srt -> writes 3_clean_srt/VideoName.srt
             optimizer.run()
-            logger.info("Step 3/4: Completed successfully.")
 
         # --- STEP 4: TRANSLATION ---
         if mode in ["full", "translate"]:
-            clean_srt_count = self._get_file_count(self.dirs["clean_srt"], ".srt")
+            clean_srt_count = self._get_file_count(self.dirs["clean_srt"], (".srt",))
             logger.info(f"Step 4/4: Translation | Engine: {engine} | Source: {clean_srt_count} files.")
             
             if engine == "llm":
-                logger.info("Initializing UI Automation Provider (Target: Microsoft Edge)...")
+                logger.info("Initializing UI Automation Provider...")
                 provider = CopilotUIProvider(window_title="Edge")
                 translator = LLMTranslator(
                     input_dir=str(self.dirs["clean_srt"]),
@@ -114,18 +122,16 @@ class VideoTranslationPipeline:
                     config=self.config["llm_config"]
                 )
             else:
-                logger.info("Initializing Legacy Translator (Deep Translator)...")
+                logger.info("Initializing Legacy Translator...")
                 translator = LegacyTranslator(
                     input_dir=str(self.dirs["clean_srt"]),
                     output_dir=str(self.dirs["final"]),
                     config_path="configs/settings.json"
                 )
             translator.run()
-            logger.info(f"Step 4/4: Completed. Final files located in: {self.dirs['final']}")
+            logger.info(f"Step 4/4: Completed. Final files: {self.dirs['final']}")
 
-        logger.info("================================================")
         logger.info("✨ ALL PIPELINE TASKS FINISHED SUCCESSFULLY! ✨")
-        logger.info("================================================")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-stage Video Translation Pipeline")

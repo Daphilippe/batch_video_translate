@@ -10,9 +10,10 @@ class BaseTranslator(DirectoryMirrorTask):
     def __init__(self, input_dir, output_dir, bot=None, extensions=(".srt",)):
         super().__init__(input_dir, output_dir, extensions)
         self.bot = bot
-        self.name = ""
+        self.name = "Base"
 
-    def wait_for_stability(self, path: Path, timeout=30):
+    def wait_for_stability(self, path: Path, timeout=10):
+        """Ensures the file is fully written to disk."""
         start = time.time()
         last_size = -1
         while time.time() - start < timeout:
@@ -27,46 +28,42 @@ class BaseTranslator(DirectoryMirrorTask):
         output_file = self.get_output_path(input_file, ".srt")
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Check if translation is actually needed
+        # 1. ROBUST SKIP LOGIC
+        # We compare timestamps to ensure structural identity
         if output_file.exists():
-            if SRTHandler.extract_timestamps(input_file) == SRTHandler.extract_timestamps(output_file):
-                logger.info(f"[SKIP] {input_file.name} is already translated and valid.")
+            source_ts = SRTHandler.extract_timestamps(input_file)
+            target_ts = SRTHandler.extract_timestamps(output_file)
+            
+            if source_ts == target_ts and len(source_ts) > 0:
+                logger.info(f"[SKIP] {input_file.name} is already translated and matches source structure.")
                 return
+            logger.warning(f"[REDO] {input_file.name} structure mismatch or missing. Re-translating...")
 
+        # 2. READING CONTENT
         with open(input_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        logger.info(f"[TRANSLATING] {input_file.name} with {self.name}...")
-        translated_text = self.translate_logic(content)
+        logger.info(f"[TRANSLATING] {input_file.name} using engine: {self.name}...")
+        
+        # 3. CORE TRANSLATION (Overridden by LLMTranslator or LegacyTranslator)
+        start_time = time.time()
+        translated_raw = self.translate_logic(content)
+
+        # 4. POST-PROCESS CONDITIONING
+        # We standardize the LLM output (clean ghost boxes, fix indices, strip markdown)
+        # using the EXACT same logic applied in Step 3 (Optimizer).
+        final_standardized = SRTHandler.standardize(translated_raw)
 
         with open(output_file, "w", encoding="utf-8") as f:
-            f.write(translated_text)
+            f.write(final_standardized)
 
         self.wait_for_stability(output_file)
-        SRTHandler.normalize_file(output_file, output_file)
-        logger.info(f"[DONE] {output_file.name}")
+        
+        duration = (time.time() - start_time) / 60
+        logger.info(f"[DONE] {output_file.name} in {duration:.2f} minutes.")
 
     def translate_logic(self, text: str):
         """To be implemented by specific translation modules."""
         raise NotImplementedError
 
-class LLMTranslator(BaseTranslator):
-    def translate_logic(self, text: str, chunk_size=40):
-        """Implements the large-scale chunking for LLM context windows."""
-        lines = text.splitlines()
-        blocks, current_block = [], []
-
-        for line in lines:
-            if line.strip().isdigit() and current_block:
-                blocks.append("\n".join(current_block).strip())
-                current_block = []
-            current_block.append(line)
-        if current_block: blocks.append("\n".join(current_block).strip())
-
-        translated_chunks = []
-        for i in range(0, len(blocks), chunk_size):
-            chunk = "\n\n".join(blocks[i : i + chunk_size])
-            logger.info(f"  -> Sending chunk {i//chunk_size + 1} to Copilot")
-            translated_chunks.append(self.bot.answer(chunk))
-
-        return "\n\n".join(translated_chunks).strip()
+# --- Note: You can keep LLMTranslator here or move it to its own file ---
