@@ -11,8 +11,10 @@ from modules.transcriber import WhisperTranscriber
 from modules.srt_optimizer import SRTOptimizer
 from modules.llm_translator import LLMTranslator
 from modules.legacy_translator import LegacyTranslator
+from modules.strategies.hybrid_refiner import HybridRefiner # Nouveau
 from modules.providers.copilot_ui import CopilotUIProvider
 from modules.providers.llama_provider import LlamaCPPProvider
+
 
 # Advanced Logging Setup
 logging.basicConfig(
@@ -33,11 +35,13 @@ class VideoTranslationPipeline:
         self.final_output = Path(output_dir)
         self.work_dir = self.final_output / "internals"
 
-        # Define directory structure
+        # Define directory structure - Ajout des dossiers pour L1 et Mt
         self.dirs = {
-            "audio": self.work_dir / "1_audio",      # Now contains FOLDERS of segments
+            "audio": self.work_dir / "1_audio",
             "raw_srt": self.work_dir / "2_raw_srt",
-            "clean_srt": self.work_dir / "3_clean_srt",
+            "clean_srt": self.work_dir / "3_clean_srt",    # S1 (Anchor)
+            "legacy_mt": self.work_dir / "4_legacy_mt",   # L1 (Literal)
+            "llm_mt": self.work_dir / "5_llm_mt",         # Mt (Draft)
             "final": self.final_output / "subtitles_ready"
         }
         
@@ -57,32 +61,21 @@ class VideoTranslationPipeline:
             logger.error(f"Input directory not found: {input_path}")
             return
 
-        # Get segment_time from config or default to 10 mins (600s)
         seg_time = self.config.get("whisper", {}).get("segment_time", 600)
-
         logger.info(f"Starting pipeline in '{mode}' mode using '{engine}' engine.")
-        logger.info(f"Segmentation Interval: {seg_time}s")
 
-        # --- STEP 1: AUDIO EXTRACTION (SEGMENTED) ---
+        # --- STEP 1: AUDIO EXTRACTION ---
         if mode in ["full", "extract"]:
             video_extensions = (".mp4", ".mkv", ".avi", ".mov")
             video_count = self._get_file_count(input_path, video_extensions)
             logger.info(f"Step 1/4: Audio Extraction | Found {video_count} videos.")
-            
-            extractor = AudioExtractor(
-                input_dir=str(input_path),
-                output_dir=str(self.dirs["audio"]),
-                segment_time=seg_time
-            )
+            extractor = AudioExtractor(input_dir=str(input_path), output_dir=str(self.dirs["audio"]), segment_time=seg_time)
             extractor.run()
-            logger.info("Step 1/4: Completed successfully.")
 
-        # --- STEP 2: TRANSCRIPTION (MERGED SEGMENTS) ---
+        # --- STEP 2: TRANSCRIPTION ---
         if mode in ["full", "transcribe"]:
-            # We count folders in 1_audio (one folder per video)
             folder_count = self._get_file_count(self.dirs["audio"], "dir")
             logger.info(f"Step 2/4: Transcription | Processing {folder_count} video folders.")
-            
             transcriber = WhisperTranscriber(
                 input_dir=str(self.dirs["audio"]),
                 output_dir=str(self.dirs["raw_srt"]),
@@ -91,54 +84,59 @@ class VideoTranslationPipeline:
                 lang=self.config["whisper"].get("lang", "auto"),
                 segment_time=seg_time
             )
-            # This will generate: internals/2_raw_srt/VideoName.srt
             transcriber.run()
-            logger.info("Step 2/4: Completed. Merged SRTs are in 2_raw_srt.")
 
-        # --- STEP 3: OPTIMIZATION ---
+        # --- STEP 3: OPTIMIZATION (S1) ---
         if mode in ["full", "optimize"]:
-            # IMPORTANT: Optimization reads the SINGLE merged files from Step 2
             raw_srt_count = self._get_file_count(self.dirs["raw_srt"], (".srt",))
-            logger.info(f"Step 3/4: SRT Optimization | Processing {raw_srt_count} merged files.")
-            
-            optimizer = SRTOptimizer(
-                input_dir=str(self.dirs["raw_srt"]),
-                output_dir=str(self.dirs["clean_srt"])
-            )
-            # This reads 2_raw_srt/VideoName.srt -> writes 3_clean_srt/VideoName.srt
+            logger.info(f"Step 3/4: SRT Optimization (Source S1) | Processing {raw_srt_count} files.")
+            optimizer = SRTOptimizer(input_dir=str(self.dirs["raw_srt"]), output_dir=str(self.dirs["clean_srt"]))
             optimizer.run()
 
-        # --- STEP 4: TRANSLATION ---
+        # --- STEP 4: TRANSLATION & REFINEMENT ---
         if mode in ["full", "translate"]:
             clean_srt_count = self._get_file_count(self.dirs["clean_srt"], (".srt",))
             logger.info(f"Step 4/4: Translation | Engine: {engine} | Source: {clean_srt_count} files.")
-            if (engine == "llm-local"):
-                logger.info("Initializing UI Automation Provider...")
-                provider = LlamaCPPProvider()
-                translator = LLMTranslator(
-                    input_dir=str(self.dirs["clean_srt"]),
+            
+            # --- Cas 1 : Engine HYBRID (S1 + L1 + Mt) ---
+            if engine == "hybrid":
+                logger.info("Starting Hybrid Protocol (Arbitration S1/L1/Mt)...")
+                
+                # A. Génération de L1 (Legacy)
+                logger.info("Generating L1 (Literal)...")
+                legacy = LegacyTranslator(input_dir=str(self.dirs["clean_srt"]), output_dir=str(self.dirs["legacy_mt"]), config_path="configs/settings.json")
+                legacy.run()
+
+                # B. Génération de Mt (LLM Draft)
+                logger.info("Generating Mt (LLM Draft)...")
+                provider = LlamaCPPProvider() # Utilise ton serveur local
+                llm_draft = LLMTranslator(input_dir=str(self.dirs["clean_srt"]), output_dir=str(self.dirs["llm_mt"]), provider=provider, config=self.config["translation"])
+                llm_draft.run()
+
+                # C. Arbitrage Final (Hybrid Refiner)
+                logger.info("Performing Final Hybrid Refinement...")
+                refiner = HybridRefiner(
+                    s1_dir=str(self.dirs["clean_srt"]),
+                    l1_dir=str(self.dirs["legacy_mt"]),
+                    mt_dir=str(self.dirs["llm_mt"]),
                     output_dir=str(self.dirs["final"]),
                     provider=provider,
-                    config=self.config["llm_config"]
+                    config=self.config["translation"]
                 )
-            elif (engine == "llm-ui"):
-                logger.info("Initializing UI Automation Provider...")
-                provider = CopilotUIProvider(window_title="Edge")
-                translator = LLMTranslator(
-                    input_dir=str(self.dirs["clean_srt"]),
-                    output_dir=str(self.dirs["final"]),
-                    provider=provider,
-                    config=self.config["llm_config"]
-                )
+                refiner.run()
+
+            # --- Cas 2 : Autres Moteurs (Direct) ---
             else:
-                logger.info("Initializing Legacy Translator...")
-                translator = LegacyTranslator(
-                    input_dir=str(self.dirs["clean_srt"]),
-                    output_dir=str(self.dirs["final"]),
-                    config_path="configs/settings.json"
-                )
-            translator.run()
-            logger.info(f"Step 4/4: Completed. Final files: {self.dirs['final']}")
+                if engine == "llm-local":
+                    provider = LlamaCPPProvider()
+                    translator = LLMTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), provider, self.config["translation"])
+                elif engine == "llm-ui":
+                    provider = CopilotUIProvider(window_title="Edge")
+                    translator = LLMTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), provider, self.config["translation"])
+                else: # legacy
+                    translator = LegacyTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), "configs/settings.json")
+                
+                translator.run()
 
         logger.info("✨ ALL PIPELINE TASKS FINISHED SUCCESSFULLY! ✨")
 
@@ -147,7 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", required=True, help="Path to source video folder")
     parser.add_argument("--output", required=True, help="Path to result folder")
     parser.add_argument("--mode", default="full", choices=["full", "extract", "transcribe", "optimize", "translate"])
-    parser.add_argument("--engine", default="legacy", choices=["llm-local","llm-ui", "legacy"])
+    parser.add_argument("--engine", default="legacy", choices=["llm-local","llm-ui", "legacy", "hybrid"])
     
     args = parser.parse_args()
     pipeline = VideoTranslationPipeline(output_dir=args.output)
