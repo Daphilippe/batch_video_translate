@@ -2,7 +2,6 @@ import argparse
 import json
 import logging
 import sys
-import os
 from pathlib import Path
 
 # Module Imports
@@ -24,12 +23,13 @@ logger = logging.getLogger("VideoPipeline")
 
 class VideoTranslationPipeline:
     def __init__(self, output_dir, config_path="configs/settings.json"):
-        logger.info(f"--- Initializing Pipeline ---")
+        logger.info("--- Initializing Pipeline ---")
         logger.info(f"Loading configuration from: {config_path}")
         
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = json.load(f)
         
+        self._validate_config()
         self.final_output = Path(output_dir)
         self.work_dir = self.final_output / "internals"
 
@@ -44,9 +44,23 @@ class VideoTranslationPipeline:
         for name, path in self.dirs.items():
             path.mkdir(parents=True, exist_ok=True)
 
+    def _validate_config(self):
+        """Validates that required configuration sections and keys are present."""
+        required_keys = {
+            "whisper": ["bin_path", "model_path"],
+            "llm_config": ["source_lang", "target_lang"],
+        }
+        for section, keys in required_keys.items():
+            if section not in self.config:
+                raise ValueError(f"Missing required config section: '{section}'")
+            for key in keys:
+                if key not in self.config[section]:
+                    raise ValueError(f"Missing required config key: '{section}.{key}'")
+
     def _get_file_count(self, path, extension):
         """Helper to count files or directories for progress tracking."""
-        if not path.exists(): return 0
+        if not path.exists():
+            return 0
         if extension == "dir":
             return len([d for d in path.iterdir() if d.is_dir()])
         return len([f for f in path.iterdir() if f.suffix.lower() in extension])
@@ -135,7 +149,7 @@ class VideoTranslationPipeline:
                 translator = LegacyTranslator(
                     input_dir=str(self.dirs["clean_srt"]),
                     output_dir=str(self.dirs["final"]),
-                    config_path="configs/settings.json"
+                    config=self.config
                 )
             translator.run()
             logger.info(f"Step 4/4: Completed. Final files: {self.dirs['final']}")

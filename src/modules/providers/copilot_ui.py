@@ -36,17 +36,15 @@ class CopilotUIProvider(LLMProvider):
         # 1. Prepare prompt
         pyperclip.copy(prompt)
         
-        print("\n[OPERATOR] 🖱️ Click inside the LLM input box to paste and send...")
+        logger.info("[OPERATOR] Click inside the LLM input box to paste and send...")
         self._wait_for_click()
         
         # 2. Automation: Paste and Enter
         keyboard.send_keys("^v")
-        # time.sleep(0.5)
-        # keyboard.send_keys("{ENTER}")
-        input("    Press any key ...")
+        input("    Press any key to continue...")
         
         # 3. Wait for manual copy back
-        print("[OPERATOR] ⏳ Wait for generation, then Ctrl+A -> Ctrl+C.")
+        logger.info("[OPERATOR] Wait for generation, then Ctrl+A -> Ctrl+C.")
         input("[OPERATOR] Press ENTER here once you have copied the response...")
         response = pyperclip.paste().strip()
         return response

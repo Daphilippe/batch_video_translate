@@ -10,11 +10,8 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class LegacyTranslator(BaseTranslator):
-    def __init__(self, input_dir, output_dir, config_path="configs/settings.json"):
-        # Load Config
-        with open(config_path, "r", encoding="utf-8") as f:
-            self.config = json.load(f)
-        
+    def __init__(self, input_dir, output_dir, config):
+        self.config = config
         # Initialize parent with None for bot because deep_translator is a library, not a bot
         super().__init__(input_dir, output_dir, None, extensions=(".srt",))
         
@@ -52,8 +49,9 @@ class LegacyTranslator(BaseTranslator):
             t = t.replace(key.lower(), f"({val})")
         return t
 
-    def _safe_translate_batch(self, batch: list) -> list:
-        """Secure translation with rate-limit (429) handling."""
+    def _safe_translate_batch(self, batch: list, _retries: int = 0) -> list:
+        """Secure translation with rate-limit (429) handling and retry cap."""
+        max_retries = self.config.get("translation", {}).get("max_retries", 5)
         query = " ||| ".join(batch)
         try:
             result = self.translator.translate(query)
@@ -61,10 +59,13 @@ class LegacyTranslator(BaseTranslator):
             return [res.strip() for res in result.split(" ||| ")]
         except Exception as e:
             if "429" in str(e):
+                if _retries >= max_retries:
+                    logger.error(f"Max retries ({max_retries}) exceeded for batch. Skipping.")
+                    return []
                 delay = self.config["translation"].get("retry_delay", 30)
-                logger.warning(f"Rate limit hit. Waiting {delay}s...")
+                logger.warning(f"Rate limit hit. Waiting {delay}s... (retry {_retries + 1}/{max_retries})")
                 time.sleep(delay)
-                return self._safe_translate_batch(batch)
+                return self._safe_translate_batch(batch, _retries + 1)
             logger.error(f"Translation error: {e}")
             return []
 
