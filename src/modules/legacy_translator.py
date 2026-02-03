@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import random
 import logging
@@ -10,10 +11,9 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class LegacyTranslator(BaseTranslator):
-    def __init__(self, input_dir, output_dir, config):
+    def __init__(self, input_dir: str, output_dir: str, config: dict):
         self.config = config
-        # Initialize parent with None for bot because deep_translator is a library, not a bot
-        super().__init__(input_dir, output_dir, None, extensions=(".srt",))
+        super().__init__(input_dir, output_dir, extensions=(".srt",))
         
         self.translator = GoogleTranslator(
             source=self.config["translation"]["source_lang"], 
@@ -78,7 +78,7 @@ class LegacyTranslator(BaseTranslator):
         # 1. Analyze file and check line-cache
         for line in lines:
             clean = line.strip()
-            if clean.isdigit() or "-->" in clean or not clean:
+            if re.match(r"^[0-9]+$", clean) or "-->" in clean or not clean:
                 final_lines.append(line)
             else:
                 l_hash = SRTHandler.get_hash(clean)
@@ -91,6 +91,8 @@ class LegacyTranslator(BaseTranslator):
 
         # 2. Batch translation
         i = 0
+        batch_count = 0
+        cache_save_interval = 5  # Save cache every N batches instead of every batch
         max_chars = self.config["translation"].get("max_chars_batch", 2000)
         while i < len(to_translate):
             current_batch, current_meta, current_len = [], [], 0
@@ -109,9 +111,16 @@ class LegacyTranslator(BaseTranslator):
                     for (idx, h), res in zip(current_meta, results):
                         final_lines[idx] = res
                         self.cache[h] = res
-                    self.save_cache() # Save cache frequently in case of crash
+                
+                batch_count += 1
+                if batch_count % cache_save_interval == 0:
+                    self.save_cache()
                 
                 time.sleep(random.uniform(1.2, 2.5)) 
+
+        # Final cache save for any remaining unsaved entries
+        if batch_count % cache_save_interval != 0:
+            self.save_cache()
 
         return "\n".join([l if l is not None else "..." for l in final_lines])
 

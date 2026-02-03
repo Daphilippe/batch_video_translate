@@ -1,7 +1,7 @@
 import logging
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 from modules.translator import BaseTranslator
 from utils.srt_handler import SRTHandler
 from modules.providers.base_provider import LLMProvider
@@ -9,13 +9,15 @@ from modules.providers.base_provider import LLMProvider
 logger = logging.getLogger(__name__)
 
 class LLMTranslator(BaseTranslator):
-    def __init__(self, input_dir, output_dir, provider: LLMProvider, config: Dict):
+    def __init__(self, input_dir: str, output_dir: str, provider: LLMProvider, config: Dict):
         # BaseTranslator handles file loops and skip logic
-        super().__init__(input_dir, output_dir, bot=provider, extensions=(".srt",))
+        super().__init__(input_dir, output_dir, extensions=(".srt",))
         
         self.provider = provider
         self.config = config
         self.chunk_size = config.get("chunk_size", 30)
+        self.chunk_delay = config.get("chunk_delay", 1.0)  # Seconds between LLM calls
+        self.name = provider.name if hasattr(provider, 'name') else "LLM"
         
         # Load Instructions from external .txt file
         self.system_instructions = self._load_custom_prompt(config)
@@ -58,11 +60,22 @@ class LLMTranslator(BaseTranslator):
             prompt = f"CONTENT TO TRANSLATE:\n{chunk_text}"
             
             logger.info(f"Processing Chunk {idx}/{total_chunks}...")
-            raw_response = self.provider.ask(self.system_instructions,prompt)
+            
+            try:
+                raw_response = self.provider.ask(self.system_instructions, prompt)
+            except Exception as e:
+                logger.error(f"Chunk {idx}: Provider error: {e}. Keeping source text.")
+                translated_full_blocks.extend(chunk)
+                continue
             
             try:
                 # Parse response and validate format
                 translated_blocks = SRTHandler.parse_to_blocks(raw_response)
+                
+                if not translated_blocks:
+                    logger.warning(f"Chunk {idx}: LLM returned empty/unparseable response. Keeping source.")
+                    translated_full_blocks.extend(chunk)
+                    continue
                 
                 if len(translated_blocks) != len(chunk):
                     logger.warning(
@@ -74,5 +87,10 @@ class LLMTranslator(BaseTranslator):
             except Exception as e:
                 logger.error(f"Failed to parse LLM response for chunk {idx}: {e}")
                 translated_full_blocks.extend(chunk)
+
+            # Rate-limit protection: pause between chunks to avoid overloading
+            # the LLM server (local or remote). Configurable via "chunk_delay".
+            if idx < total_chunks:
+                time.sleep(self.chunk_delay)
 
         return SRTHandler.render_blocks(translated_full_blocks)

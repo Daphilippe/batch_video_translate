@@ -1,8 +1,10 @@
 import argparse
 import json
 import logging
+import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Module Imports
 from modules.extractor import AudioExtractor
@@ -10,6 +12,7 @@ from modules.transcriber import WhisperTranscriber
 from modules.srt_optimizer import SRTOptimizer
 from modules.llm_translator import LLMTranslator
 from modules.legacy_translator import LegacyTranslator
+from modules.translator import BaseTranslator
 from modules.providers.copilot_ui import CopilotUIProvider
 from modules.providers.llama_provider import LlamaCPPProvider
 
@@ -22,14 +25,20 @@ logging.basicConfig(
 logger = logging.getLogger("VideoPipeline")
 
 class VideoTranslationPipeline:
-    def __init__(self, output_dir, config_path="configs/settings.json"):
+    def __init__(self, output_dir: str, config_path: str = "configs/settings.json"):
         logger.info("--- Initializing Pipeline ---")
         logger.info(f"Loading configuration from: {config_path}")
         
-        with open(config_path, "r", encoding="utf-8") as f:
-            self.config = json.load(f)
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                self.config = json.load(f)
+        except FileNotFoundError:
+            raise ValueError(f"Configuration file not found: '{config_path}'")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in configuration file '{config_path}': {e}")
         
         self._validate_config()
+        self._validate_binaries()
         self.final_output = Path(output_dir)
         self.work_dir = self.final_output / "internals"
 
@@ -44,7 +53,7 @@ class VideoTranslationPipeline:
         for name, path in self.dirs.items():
             path.mkdir(parents=True, exist_ok=True)
 
-    def _validate_config(self):
+    def _validate_config(self) -> None:
         """Validates that required configuration sections and keys are present."""
         required_keys = {
             "whisper": ["bin_path", "model_path"],
@@ -56,6 +65,28 @@ class VideoTranslationPipeline:
             for key in keys:
                 if key not in self.config[section]:
                     raise ValueError(f"Missing required config key: '{section}.{key}'")
+
+    def _validate_binaries(self) -> None:
+        """Validates that required external binaries are accessible."""
+        # Validate FFmpeg
+        if not shutil.which("ffmpeg"):
+            raise FileNotFoundError(
+                "FFmpeg not found in PATH. Install it and ensure it's accessible."
+            )
+        
+        # Validate Whisper binary
+        whisper_bin = Path(self.config["whisper"]["bin_path"])
+        if not whisper_bin.exists():
+            raise FileNotFoundError(
+                f"Whisper binary not found at: {whisper_bin}"
+            )
+        
+        # Validate Whisper model
+        model_path = Path(self.config["whisper"]["model_path"])
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Whisper model file not found at: {model_path}"
+            )
 
     def _get_file_count(self, path, extension):
         """Helper to count files or directories for progress tracking."""
@@ -126,45 +157,64 @@ class VideoTranslationPipeline:
         if mode in ["full", "translate"]:
             clean_srt_count = self._get_file_count(self.dirs["clean_srt"], (".srt",))
             logger.info(f"Step 4/4: Translation | Engine: {engine} | Source: {clean_srt_count} files.")
-            if (engine == "llm-local"):
-                logger.info("Initializing UI Automation Provider...")
-                provider = LlamaCPPProvider()
-                translator = LLMTranslator(
-                    input_dir=str(self.dirs["clean_srt"]),
-                    output_dir=str(self.dirs["final"]),
-                    provider=provider,
-                    config=self.config["llm_config"]
-                )
-            elif (engine == "llm-ui"):
-                logger.info("Initializing UI Automation Provider...")
-                provider = CopilotUIProvider(window_title="Edge")
-                translator = LLMTranslator(
-                    input_dir=str(self.dirs["clean_srt"]),
-                    output_dir=str(self.dirs["final"]),
-                    provider=provider,
-                    config=self.config["llm_config"]
-                )
-            else:
-                logger.info("Initializing Legacy Translator...")
-                translator = LegacyTranslator(
-                    input_dir=str(self.dirs["clean_srt"]),
-                    output_dir=str(self.dirs["final"]),
-                    config=self.config
-                )
+            translator = self._create_translator(engine)
             translator.run()
             logger.info(f"Step 4/4: Completed. Final files: {self.dirs['final']}")
 
         logger.info("✨ ALL PIPELINE TASKS FINISHED SUCCESSFULLY! ✨")
 
+    def _create_translator(self, engine: str) -> BaseTranslator:
+        """Factory method for translator engine creation."""
+        engine_factories = {
+            "llm-local": self._create_llm_local_translator,
+            "llm-ui": self._create_llm_ui_translator,
+            "legacy": self._create_legacy_translator,
+        }
+        factory = engine_factories.get(engine)
+        if not factory:
+            raise ValueError(
+                f"Unknown engine: '{engine}'. Available: {list(engine_factories.keys())}"
+            )
+        return factory()
+
+    def _create_llm_local_translator(self) -> LLMTranslator:
+        logger.info("Initializing Local LLM Provider (llama.cpp)...")
+        provider = LlamaCPPProvider()
+        return LLMTranslator(
+            input_dir=str(self.dirs["clean_srt"]),
+            output_dir=str(self.dirs["final"]),
+            provider=provider,
+            config=self.config["llm_config"]
+        )
+
+    def _create_llm_ui_translator(self) -> LLMTranslator:
+        logger.info("Initializing UI Automation Provider...")
+        provider = CopilotUIProvider(window_title="Edge")
+        return LLMTranslator(
+            input_dir=str(self.dirs["clean_srt"]),
+            output_dir=str(self.dirs["final"]),
+            provider=provider,
+            config=self.config["llm_config"]
+        )
+
+    def _create_legacy_translator(self) -> LegacyTranslator:
+        logger.info("Initializing Legacy Translator...")
+        return LegacyTranslator(
+            input_dir=str(self.dirs["clean_srt"]),
+            output_dir=str(self.dirs["final"]),
+            config=self.config
+        )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-stage Video Translation Pipeline")
     parser.add_argument("--input", required=True, help="Path to source video folder")
     parser.add_argument("--output", required=True, help="Path to result folder")
+    parser.add_argument("--config", default="configs/settings.json", help="Path to configuration file")
     parser.add_argument("--mode", default="full", choices=["full", "extract", "transcribe", "optimize", "translate"])
     parser.add_argument("--engine", default="legacy", choices=["llm-local","llm-ui", "legacy"])
     
     args = parser.parse_args()
-    pipeline = VideoTranslationPipeline(output_dir=args.output)
+    pipeline = VideoTranslationPipeline(output_dir=args.output, config_path=args.config)
     try:
         pipeline.run(input_dir=args.input, mode=args.mode, engine=args.engine)
     except KeyboardInterrupt:

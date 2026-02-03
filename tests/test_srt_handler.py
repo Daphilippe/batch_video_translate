@@ -178,10 +178,23 @@ class TestParseToBlocks:
         assert len(blocks) == 1
         assert blocks[0]["text"] == ["Line one", "Line two"]
 
-    def test_cleans_bracket_artifacts(self):
-        content = "1\n00:00:01,000 --> 00:00:02,000\n[Hello]\n"
+    def test_preserves_brackets(self):
+        """Brackets like [Music] should be preserved as legitimate SRT annotations."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n[Music]\n"
         blocks = SRTHandler.parse_to_blocks(content)
-        assert blocks[0]["text"] == ["Hello"]
+        assert blocks[0]["text"] == ["[Music]"]
+
+    def test_strips_wrapping_quotes(self):
+        """Full-line wrapping quotes (LLM artifact) should be stripped."""
+        content = '1\n00:00:01,000 --> 00:00:02,000\n"Hello world"\n'
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert blocks[0]["text"] == ["Hello world"]
+
+    def test_preserves_internal_quotes(self):
+        """Quotes that are part of dialogue should be preserved."""
+        content = '1\n00:00:01,000 --> 00:00:02,000\nHe said "hello" to me\n'
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert blocks[0]["text"] == ['He said "hello" to me']
 
     def test_skips_lines_before_timestamp(self):
         content = "Random header text\n1\n00:00:01,000 --> 00:00:02,000\nHello\n"
@@ -309,3 +322,242 @@ class TestStandardize:
         blocks = SRTHandler.parse_to_blocks(result)
         assert len(blocks) == 1
         assert blocks[0]["text"] == ["Bonjour"]
+
+    def test_cleans_bold_markers_via_clean_text(self):
+        """standardize() should now apply clean_text, removing **bold** markers."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n**Hello world**\n"
+        result = SRTHandler.standardize(content)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert blocks[0]["text"] == ["Hello world"]
+
+    def test_cleans_box_characters_via_clean_text(self):
+        """standardize() should now apply clean_text, replacing □ and ▪."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n□ item one\n"
+        result = SRTHandler.standardize(content)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert blocks[0]["text"] == ["- item one"]
+
+    def test_collapses_whitespace_via_clean_text(self):
+        """standardize() should collapse excessive whitespace."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\ntoo   many  spaces\n"
+        result = SRTHandler.standardize(content)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert blocks[0]["text"] == ["too many spaces"]
+
+
+# --- apply_offset_to_blocks (immutability) ---
+
+class TestApplyOffsetImmutability:
+    def test_does_not_mutate_original_blocks(self):
+        """apply_offset_to_blocks should return new block dicts, not mutate originals."""
+        blocks = [{"start": "00:00:01,000", "end": "00:00:03,000", "text": "Hello"}]
+        original_start = blocks[0]["start"]
+        original_end = blocks[0]["end"]
+        result = SRTHandler.apply_offset_to_blocks(blocks, 600)
+        # Original should be unchanged
+        assert blocks[0]["start"] == original_start
+        assert blocks[0]["end"] == original_end
+        # Result should be shifted
+        assert result[0]["start"] == "00:10:01,000"
+        assert result[0]["end"] == "00:10:03,000"
+
+    def test_returned_blocks_are_separate_dicts(self):
+        """Returned blocks should not be the same object references."""
+        blocks = [{"start": "00:00:01,000", "end": "00:00:03,000", "text": "Hello"}]
+        result = SRTHandler.apply_offset_to_blocks(blocks, 10)
+        assert result[0] is not blocks[0]
+
+
+# --- Non-western character support ---
+
+CYRILLIC_SRT = """\
+1
+00:00:01,000 --> 00:00:03,000
+Привет мир
+
+2
+00:00:04,000 --> 00:00:06,000
+Это тест
+
+3
+00:00:07,000 --> 00:00:09,000
+До свидания
+"""
+
+CHINESE_SRT = """\
+1
+00:00:01,000 --> 00:00:03,000
+你好世界
+
+2
+00:00:04,000 --> 00:00:06,000
+这是一个测试
+
+3
+00:00:07,000 --> 00:00:09,000
+再见
+"""
+
+MIXED_SCRIPT_SRT = """\
+1
+00:00:01,000 --> 00:00:03,000
+Hello 你好 Привет
+
+2
+00:00:04,000 --> 00:00:06,000
+Test with café, naïve, and 日本語
+"""
+
+
+class TestCyrillicSupport:
+    def test_parse_cyrillic_srt(self):
+        blocks = SRTHandler.parse_to_blocks(CYRILLIC_SRT)
+        assert len(blocks) == 3
+        assert blocks[0]["text"] == ["Привет мир"]
+        assert blocks[1]["text"] == ["Это тест"]
+        assert blocks[2]["text"] == ["До свидания"]
+
+    def test_standardize_cyrillic(self):
+        result = SRTHandler.standardize(CYRILLIC_SRT)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert len(blocks) == 3
+        assert blocks[0]["text"] == ["Привет мир"]
+
+    def test_merge_identical_cyrillic(self):
+        content = (
+            "1\n00:00:01,000 --> 00:00:02,000\nПривет\n\n"
+            "2\n00:00:02,000 --> 00:00:03,000\nПривет\n\n"
+            "3\n00:00:04,000 --> 00:00:05,000\nМир\n"
+        )
+        result = SRTHandler.standardize(content)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert len(blocks) == 2
+        assert blocks[0]["end"] == "00:00:03,000"
+
+    def test_hash_cyrillic_deterministic(self):
+        h1 = SRTHandler.get_hash("Привет мир")
+        h2 = SRTHandler.get_hash("Привет мир")
+        assert h1 == h2
+
+    def test_hash_cyrillic_differs_from_latin(self):
+        h1 = SRTHandler.get_hash("Привет")
+        h2 = SRTHandler.get_hash("Hello")
+        assert h1 != h2
+
+    def test_render_roundtrip_cyrillic(self):
+        blocks = SRTHandler.parse_to_blocks(CYRILLIC_SRT)
+        rendered = SRTHandler.render_blocks(blocks)
+        re_parsed = SRTHandler.parse_to_blocks(rendered)
+        assert len(re_parsed) == 3
+        assert re_parsed[0]["text"] == ["Привет мир"]
+
+
+class TestChineseSupport:
+    def test_parse_chinese_srt(self):
+        blocks = SRTHandler.parse_to_blocks(CHINESE_SRT)
+        assert len(blocks) == 3
+        assert blocks[0]["text"] == ["你好世界"]
+        assert blocks[1]["text"] == ["这是一个测试"]
+        assert blocks[2]["text"] == ["再见"]
+
+    def test_standardize_chinese(self):
+        result = SRTHandler.standardize(CHINESE_SRT)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert len(blocks) == 3
+        assert blocks[2]["text"] == ["再见"]
+
+    def test_chinese_ellipsis_replacement(self):
+        """Chinese often uses … (U+2026). clean_text replaces it with '...'."""
+        result = SRTHandler.clean_text("等一下…")
+        assert result == "等一下..."
+
+    def test_fullwidth_digits_not_treated_as_index(self):
+        """Full-width digits (１２３) must NOT be parsed as SRT block indices."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n１２３\n"
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert len(blocks) == 1
+        assert blocks[0]["text"] == ["１２３"]
+
+    def test_merge_identical_chinese(self):
+        content = (
+            "1\n00:00:01,000 --> 00:00:02,000\n你好\n\n"
+            "2\n00:00:02,000 --> 00:00:03,000\n你好\n"
+        )
+        result = SRTHandler.standardize(content)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert len(blocks) == 1
+        assert blocks[0]["end"] == "00:00:03,000"
+
+    def test_render_roundtrip_chinese(self):
+        blocks = SRTHandler.parse_to_blocks(CHINESE_SRT)
+        rendered = SRTHandler.render_blocks(blocks)
+        re_parsed = SRTHandler.parse_to_blocks(rendered)
+        assert len(re_parsed) == 3
+        assert re_parsed[1]["text"] == ["这是一个测试"]
+
+
+class TestMixedScriptSupport:
+    def test_parse_mixed_scripts(self):
+        blocks = SRTHandler.parse_to_blocks(MIXED_SCRIPT_SRT)
+        assert len(blocks) == 2
+        assert blocks[0]["text"] == ["Hello 你好 Привет"]
+        assert blocks[1]["text"] == ["Test with café, naïve, and 日本語"]
+
+    def test_standardize_mixed(self):
+        result = SRTHandler.standardize(MIXED_SCRIPT_SRT)
+        blocks = SRTHandler.parse_to_blocks(result)
+        assert len(blocks) == 2
+
+    def test_arabic_digits_not_treated_as_index(self):
+        """Arabic-Indic digits (٣٢١) must NOT be parsed as SRT block indices."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n٣٢١\n"
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert len(blocks) == 1
+        assert blocks[0]["text"] == ["٣٢١"]
+
+    def test_devanagari_digits_not_treated_as_index(self):
+        """Devanagari digits (१२३) must NOT be parsed as SRT block indices."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n१२३\n"
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert len(blocks) == 1
+        assert blocks[0]["text"] == ["१२३"]
+
+    def test_korean_text(self):
+        content = "1\n00:00:01,000 --> 00:00:02,000\n안녕하세요\n"
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert len(blocks) == 1
+        assert blocks[0]["text"] == ["안녕하세요"]
+
+    def test_japanese_mixed_text(self):
+        """Japanese uses Kanji + Hiragana + Katakana."""
+        content = "1\n00:00:01,000 --> 00:00:02,000\n東京タワーへようこそ\n"
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert len(blocks) == 1
+        assert blocks[0]["text"] == ["東京タワーへようこそ"]
+
+    def test_chinese_quotes_preserved(self):
+        """Chinese-style quotes (「」) should be preserved, not stripped."""
+        content = '1\n00:00:01,000 --> 00:00:02,000\n他说「你好」\n'
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert blocks[0]["text"] == ['他说「你好」']
+
+    def test_russian_quotes_preserved(self):
+        """Russian-style quotes (« ») should be preserved, not stripped."""
+        content = '1\n00:00:01,000 --> 00:00:02,000\nОн сказал «привет»\n'
+        blocks = SRTHandler.parse_to_blocks(content)
+        assert blocks[0]["text"] == ['Он сказал «привет»']
+
+    def test_clean_text_preserves_cjk(self):
+        """clean_text should not corrupt CJK characters."""
+        assert SRTHandler.clean_text("你好世界") == "你好世界"
+        assert SRTHandler.clean_text("Привет мир") == "Привет мир"
+        assert SRTHandler.clean_text("**太棒了**") == "太棒了"
+
+    def test_canonicalize_nfc_normalization(self):
+        """NFC normalization should handle composed vs decomposed forms."""
+        # é can be U+00E9 (precomposed) or U+0065 + U+0301 (decomposed)
+        decomposed = "caf\u0065\u0301"  # e + combining acute
+        composed = "café"              # precomposed é
+        h1 = SRTHandler.get_hash(decomposed)
+        h2 = SRTHandler.get_hash(composed)
+        assert h1 == h2  # NFC normalization should make these identical
