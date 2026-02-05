@@ -10,6 +10,7 @@ This project is a modular and scalable pipeline designed to automate the process
 * **Hybrid Translation Engines**:
   * **LLM Engine**: High-quality translation via Large Language Models (e.g., Copilot via UI Automation) for better nuance.
   * **Legacy Engine**: Rapid translation using standard APIs and custom technical dictionaries.
+  * **Local LLM Engine**: OpenAI-compatible local endpoint support (e.g., llama.cpp).
 
 
 * **Resilient Workspace**: Intelligent directory mirroring that allows resuming the process at any stage (Extraction, Transcription, or Translation).
@@ -77,9 +78,15 @@ Configure your environment before launching the pipeline:
 Processes everything from the source video to the final translated subtitle:
 
 ```bash
-python src/main.py --input "./source_videos" --output "./results" --engine llm
+python src/main.py --input "./source_videos" --output "./results" --mode full --engine llm-ui
 
 ```
+
+Available `--engine` values:
+
+* `llm-ui` (Copilot UI automation)
+* `llm-local` (local OpenAI-compatible endpoint)
+* `legacy` (Google Translate + technical dictionary)
 
 ### 2. Step-by-Step Execution
 
@@ -109,12 +116,19 @@ source venv/bin/activate
 
 2. **Install core dependencies**:
 ```bash
-pip install pywinauto pywin32 pypiwin32 pyperclip deep-translator regex tqdm
+pip install -r requirements.txt
+
+```
+
+3. **Run tests**:
+
+```bash
+python -m pytest tests/ -v
 
 ```
 
 
-3. **External Requirements**:
+4. **External Requirements**:
 * **FFmpeg**: Must be in your System PATH.
 * **Whisper.cpp**: Compiled executable (e.g., `main.exe`).
 * **Microsoft Edge**: Required for the default `CopilotUIProvider`.
@@ -133,8 +147,11 @@ Here is the exhaustive list of parameters available in your configuration file:
 | **LLM Engine** | `source_lang` | Full name of the source language for the prompt (e.g., "Russian"). |
 |  | `target_lang` | Full name of the target language (e.g., "French"). |
 |  | `chunk_size` | Number of SRT blocks sent in a single prompt (default: 25). |
+|  | `prompt_file` | Path to the system prompt template text file used by the LLM translator. |
 | **Legacy** | `max_chars_batch` | Character limit for Google Translate batches. |
 |  | `retry_delay` | Seconds to wait between translation retries. |
+|  | `max_retries` | Maximum number of retry attempts when rate-limited (HTTP 429). |
+|  | `cache_file` | Path to the JSON cache used for line-level translation reuse. |
 | **Context** | `technical_dictionary` | Key-value pairs of terms to ensure consistent translation. |
 
 ---
@@ -161,9 +178,12 @@ class LocalLLMProvider(LLMProvider):
     def __init__(self, api_url="http://localhost:1234/v1/chat/completions"):
         self.api_url = api_url
 
-    def ask(self, prompt: str) -> str:
+  def ask(self, content: str, prompt: str) -> str:
         response = requests.post(self.api_url, json={
-            "messages": [{"role": "user", "content": prompt}],
+      "messages": [
+        {"role": "system", "content": content},
+        {"role": "user", "content": prompt}
+      ],
             "temperature": 0.1
         })
         return response.json()['choices'][0]['message']['content']

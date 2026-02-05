@@ -19,10 +19,12 @@ class HybridRefiner(BaseTranslator):
     def process_file(self, s1_file: Path):
         """Processes a single file by arbitrating between S1, L1, and Mt sources."""
         output_file = self.get_output_path(s1_file, ".srt")
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Locate corresponding L1 and Mt files
-        l1_file = self.l1_dir / s1_file.name
-        mt_file = self.mt_dir / s1_file.name
+        # Locate corresponding L1 and Mt files using relative path (supports subdirectories)
+        relative_path = s1_file.relative_to(self.input_dir)
+        l1_file = self.l1_dir / relative_path
+        mt_file = self.mt_dir / relative_path
 
         if not l1_file.exists() or not mt_file.exists():
             logger.error(f"Missing input streams for {s1_file.name}. L1: {l1_file.exists()}, Mt: {mt_file.exists()}")
@@ -46,6 +48,7 @@ class HybridRefiner(BaseTranslator):
         try:
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(SRTHandler.standardize(final_srt_content))
+            self.wait_for_stability(output_file)
             logger.info(f"Successfully refined and saved: {output_file.name}")
         except Exception as e:
             logger.error(f"Failed to save refined SRT: {e}")

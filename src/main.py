@@ -110,7 +110,7 @@ class VideoTranslationPipeline:
                 # B. Génération de Mt (LLM Draft)
                 logger.info("Generating Mt (LLM Draft)...")
                 provider = LlamaCPPProvider() # Utilise ton serveur local
-                llm_draft = LLMTranslator(input_dir=str(self.dirs["clean_srt"]), output_dir=str(self.dirs["llm_mt"]), provider=provider, config=self.config["translation"])
+                llm_draft = LLMTranslator(input_dir=str(self.dirs["clean_srt"]), output_dir=str(self.dirs["llm_mt"]), provider=provider, config=self.config.get("llm_config", self.config.get("translation", {})))
                 llm_draft.run()
 
                 # C. Arbitrage Final (Hybrid Refiner)
@@ -129,14 +129,10 @@ class VideoTranslationPipeline:
             else:
                 if engine == "llm-local":
                     provider = LlamaCPPProvider()
-                    translator = LLMTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), provider, self.config["translation"])
+                    translator = LLMTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), provider, self.config.get("llm_config", self.config.get("translation", {})))
                 elif engine == "llm-ui":
                     provider = CopilotUIProvider(window_title="Edge")
-                    translator = LLMTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), provider, self.config["translation"])
-                else: # legacy
-                    translator = LegacyTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), "configs/settings.json")
-                
-                translator.run()
+                    translator = LLMTranslator(str(self.dirs["clean_srt"]), str(self.dirs["final"]), provider, self.config.get("llm_config", self.config.get("translation", {})))
 
         logger.info("✨ ALL PIPELINE TASKS FINISHED SUCCESSFULLY! ✨")
 
