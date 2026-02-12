@@ -51,6 +51,16 @@ class HybridRefiner(BaseTranslator):
 
         logger.info(f"Starting triple-source refinement for: {s1_file.name}")
 
+        # Load existing output for incremental refinement
+        existing_refined_text = None
+        if output_file.exists():
+            try:
+                with open(output_file, "r", encoding="utf-8") as f:
+                    existing_refined_text = f.read()
+                logger.info(f"Existing output found for {s1_file.name}. Attempting incremental refinement.")
+            except Exception as e:
+                logger.warning(f"Failed to read existing output: {e}. Performing full refinement.")
+
         try:
             with open(s1_file, "r", encoding="utf-8") as f:
                 s1_raw = f.read()
@@ -62,7 +72,11 @@ class HybridRefiner(BaseTranslator):
             logger.error(f"Failed to read input files for refinement: {e}")
             return
 
-        final_srt_content = self.refine_logic(s1_raw, l1_raw, mt_raw)
+        final_srt_content = self.refine_logic(s1_raw, l1_raw, mt_raw, existing_refined_text)
+
+        if final_srt_content is None:
+            logger.info(f"No changes needed for {s1_file.name}. Skipping write.")
+            return
 
         try:
             with open(output_file, "w", encoding="utf-8") as f:
@@ -156,11 +170,81 @@ class HybridRefiner(BaseTranslator):
             )
 
     # ------------------------------------------------------------------
+    # Incremental refinement — detect problematic blocks
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _block_text(block: Dict) -> str:
+        """Extracts text from a block as a single stripped string."""
+        text = block.get('text', '')
+        if isinstance(text, list):
+            return "\n".join(text).strip()
+        return str(text).strip()
+
+    def _identify_problematic_indices(
+        self, s1_blocks: List[Dict], existing_blocks: List[Dict]
+    ) -> tuple:
+        """
+        Compares existing refined output against S1 reference.
+        Returns (problematic_indices: set, existing_map: dict).
+
+        A block is considered "problematic" and needs re-refinement if:
+          - No existing block aligns to that S1 index
+          - The aligned block has empty text
+          - The aligned block text is identical to S1 (not translated)
+        """
+        existing_map = self._build_alignment_map(s1_blocks, existing_blocks)
+        problematic = set()
+
+        for i, s1_blk in enumerate(s1_blocks):
+            ex_blk = existing_map.get(i)
+
+            if ex_blk is None:
+                problematic.add(i)
+                continue
+
+            ex_text = self._block_text(ex_blk)
+            s1_text = self._block_text(s1_blk)
+
+            if not ex_text:
+                problematic.add(i)
+                continue
+
+            if ex_text == s1_text:
+                problematic.add(i)
+                continue
+
+        return problematic, existing_map
+
+    @staticmethod
+    def _expand_problematic_indices(
+        problematic: set, total_blocks: int, context_padding: int = 2
+    ) -> set:
+        """
+        Expands problematic indices by adding surrounding blocks for context.
+        This ensures the LLM gets enough local context to produce coherent
+        translations around the problematic areas.
+        """
+        expanded = set()
+        for idx in problematic:
+            lo = max(0, idx - context_padding)
+            hi = min(total_blocks, idx + context_padding + 1)
+            expanded.update(range(lo, hi))
+        return expanded
+
+    # ------------------------------------------------------------------
     # Core arbitration loop
     # ------------------------------------------------------------------
 
-    def refine_logic(self, s1_text: str, l1_text: str, mt_text: str) -> str:
-        """Slices the SRT into windows and performs the arbitration via LLM."""
+    def refine_logic(self, s1_text: str, l1_text: str, mt_text: str, existing_refined_text: str = None) -> str:
+        """
+        Slices the SRT into windows and performs the arbitration via LLM.
+
+        If existing_refined_text is provided (re-run scenario), performs
+        incremental refinement: only windows containing problematic blocks
+        are sent to the LLM. Already-good blocks are reused from the
+        existing output. Returns None if nothing needs re-processing.
+        """
         s1_blocks = SRTHandler.parse_to_blocks(s1_text)
         l1_blocks = SRTHandler.parse_to_blocks(l1_text)
         mt_blocks = SRTHandler.parse_to_blocks(mt_text)
@@ -173,6 +257,24 @@ class HybridRefiner(BaseTranslator):
         self._log_alignment_quality("L1", s1_blocks, l1_map)
         self._log_alignment_quality("Mt", s1_blocks, mt_map)
 
+        # --- Incremental refinement: detect problematic blocks ---
+        indices_to_refine = None   # None = process all windows (first run)
+        existing_map = {}
+
+        if existing_refined_text:
+            existing_blocks = SRTHandler.parse_to_blocks(existing_refined_text)
+            problematic, existing_map = self._identify_problematic_indices(s1_blocks, existing_blocks)
+
+            if not problematic:
+                logger.info("All blocks are already properly refined. Nothing to re-process.")
+                return None  # Signal to process_file: skip write
+
+            indices_to_refine = self._expand_problematic_indices(problematic, len(s1_blocks))
+            logger.info(
+                f"Incremental refinement: {len(problematic)} problematic blocks "
+                f"→ {len(indices_to_refine)} blocks to process (with context padding)."
+            )
+
         # Load the system protocol
         protocol_path = Path(self.config.get("refinement_protocol_file", "configs/refinement_protocol.txt"))
         if not protocol_path.exists():
@@ -184,12 +286,36 @@ class HybridRefiner(BaseTranslator):
         final_blocks = []
         step = self.config.get("chunk_size", 10)
         total_blocks = len(s1_blocks)
+        total_windows = (total_blocks - 1) // step + 1
+        skipped_windows = 0
 
         logger.info(f"Arbitrating {total_blocks} blocks using windows of {step}.")
 
         for i in range(0, total_blocks, step):
             window_indices = list(range(i, min(i + step, total_blocks)))
             s1_win = [s1_blocks[j] for j in window_indices]
+            win_label = f"{s1_win[0]['start']} → {s1_win[-1]['end']}"
+
+            # --- Incremental: skip windows where all blocks are OK ---
+            if indices_to_refine is not None:
+                window_needs_work = any(idx in indices_to_refine for idx in window_indices)
+                if not window_needs_work:
+                    skipped_windows += 1
+                    logger.info(
+                        f"Window [{i // step + 1}/{total_windows}] "
+                        f"{win_label} | SKIP — reusing existing translation"
+                    )
+                    for j in window_indices:
+                        ex_blk = existing_map.get(j)
+                        if ex_blk is not None:
+                            reused = dict(ex_blk)
+                            reused['start'] = s1_blocks[j]['start']
+                            reused['end'] = s1_blocks[j]['end']
+                            final_blocks.append(reused)
+                        else:
+                            final_blocks.append(dict(s1_blocks[j]))
+                    continue
+
             l1_win = self._collect_window_targets(window_indices, l1_map)
             mt_win = self._collect_window_targets(window_indices, mt_map)
 
@@ -199,9 +325,8 @@ class HybridRefiner(BaseTranslator):
                 logger.warning(f"Window {i}: No Mt blocks aligned. LLM draft stream may be incomplete.")
 
             user_prompt = self._build_arbitration_prompt(s1_win, l1_win, mt_win)
-            win_label = f"{s1_win[0]['start']} → {s1_win[-1]['end']}"
             logger.info(
-                f"Window [{i // step + 1}/{(total_blocks - 1) // step + 1}] "
+                f"Window [{i // step + 1}/{total_windows}] "
                 f"{win_label} | S1={len(s1_win)} L1={len(l1_win)} Mt={len(mt_win)}"
             )
 
@@ -219,7 +344,6 @@ class HybridRefiner(BaseTranslator):
                         f"Window {i}: LLM returned {len(refined_blocks)} blocks, "
                         f"expected {len(s1_win)}. Forcing S1 timestamps onto result."
                     )
-                    # Best-effort: re-stamp what we can, pad/trim to match S1 count
                     refined_blocks = self._force_align_to_s1(s1_win, refined_blocks)
 
                 # Always enforce S1 timestamps on the final output
@@ -234,6 +358,13 @@ class HybridRefiner(BaseTranslator):
 
             if i + step < total_blocks:
                 time.sleep(self.chunk_delay)
+
+        if indices_to_refine is not None:
+            processed = total_windows - skipped_windows
+            logger.info(
+                f"Incremental refinement complete: {processed}/{total_windows} windows "
+                f"sent to LLM, {skipped_windows} reused from existing output."
+            )
 
         return SRTHandler.render_blocks(final_blocks)
 
