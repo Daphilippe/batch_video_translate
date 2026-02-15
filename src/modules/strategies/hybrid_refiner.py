@@ -24,7 +24,7 @@ class HybridRefiner(BaseTranslator):
     ALIGNMENT_TOLERANCE = 5.0
 
     def __init__(self, s1_dir: str, l1_dir: str, mt_dir: str, output_dir: str, provider, config: Dict):
-        super().__init__(s1_dir, output_dir, bot=provider)
+        super().__init__(s1_dir, output_dir)
         self.l1_dir = Path(l1_dir)
         self.mt_dir = Path(mt_dir)
         self.config = config

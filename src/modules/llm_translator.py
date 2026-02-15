@@ -15,7 +15,7 @@ class LLMTranslator(BaseTranslator):
     handles skip logic, standardization, and wait_for_stability.
     """
     def __init__(self, input_dir: str, output_dir: str, provider: LLMProvider, config: Dict):
-        super().__init__(input_dir, output_dir, bot=provider, extensions=(".srt",))
+        super().__init__(input_dir, output_dir, extensions=(".srt",))
         self.provider = provider
         self.config = config
         self.chunk_size = config.get("chunk_size", 30)
