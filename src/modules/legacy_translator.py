@@ -11,6 +11,13 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class LegacyTranslator(BaseTranslator):
+    """Google Translate batch translator with line-level caching and
+    technical dictionary pre-processing.
+
+    Expects ``config["translation"]`` to contain source_lang, target_lang,
+    cache_file, and batch tuning parameters.
+    """
+
     def __init__(self, input_dir: str, output_dir: str, config: dict):
         self.config = config
         super().__init__(input_dir, output_dir, extensions=(".srt",))

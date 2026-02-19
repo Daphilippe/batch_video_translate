@@ -8,6 +8,13 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class BaseTranslator(DirectoryMirrorTask):
+    """Abstract base class for all translation engines.
+
+    Provides the file-level orchestration loop (skip logic, SRT
+    standardization, disk-write stability check).  Subclasses must
+    implement ``translate_logic(text) -> str``.
+    """
+
     def __init__(self, input_dir: str, output_dir: str, extensions: tuple = (".srt",)):
         super().__init__(input_dir, output_dir, extensions)
         self.name = "Base"

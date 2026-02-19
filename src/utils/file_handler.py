@@ -6,8 +6,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 class DirectoryMirrorTask:
-    """
-    Base class to handle directory walking and output mirroring.
+    """Base class for recursive directory-mirroring batch jobs.
+
+    Walks ``input_dir`` for files matching ``extensions``, mirrors the
+    relative path structure under ``output_dir``, and delegates each file
+    to the subclass's ``process_file()`` implementation.
     """
     def __init__(self, input_dir: str, output_dir: str, extensions: Tuple[str, ...]):
         self.input_dir = Path(input_dir)

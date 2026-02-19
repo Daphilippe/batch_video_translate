@@ -6,6 +6,10 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class SRTOptimizer(DirectoryMirrorTask):
+    """Step 3 of the pipeline — applies SRTHandler.standardize() to each
+    raw transcription file (merge identical blocks, clean artifacts, re-index).
+    """
+
     def __init__(self, input_dir: str, output_dir: str, extensions: tuple = (".srt",)):
         super().__init__(input_dir, output_dir, extensions)
 

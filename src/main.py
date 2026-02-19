@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Module Imports
+# --- Pipeline modules ---
 from modules.extractor import AudioExtractor
 from modules.transcriber import WhisperTranscriber
 from modules.srt_optimizer import SRTOptimizer
@@ -14,11 +14,13 @@ from modules.llm_translator import LLMTranslator
 from modules.legacy_translator import LegacyTranslator
 from modules.strategies.hybrid_refiner import HybridRefiner
 from modules.translator import BaseTranslator
+
+# --- LLM providers ---
 from modules.providers.copilot_ui import CopilotUIProvider
 from modules.providers.llama_provider import LlamaCPPProvider
 
 
-# Advanced Logging Setup
+# --- Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -27,6 +29,19 @@ logging.basicConfig(
 logger = logging.getLogger("VideoPipeline")
 
 class VideoTranslationPipeline:
+    """Main orchestrator for the 4-step video translation pipeline.
+
+    Steps:
+        1. Audio extraction (FFmpeg segmentation)
+        2. Transcription   (Whisper.cpp, segment-aware)
+        3. SRT optimization (merge, clean, re-index)
+        4. Translation      (legacy | llm-local | llm-ui | hybrid)
+
+    The hybrid engine performs triple-source arbitration:
+        S1 (source SRT) + L1 (Google Translate literal) + Mt (LLM draft)
+        → HybridRefiner with incremental re-run support.
+    """
+
     def __init__(self, output_dir: str, config_path: str = "configs/settings.json"):
         logger.info("--- Initializing Pipeline ---")
         logger.info(f"Loading configuration from: {config_path}")
@@ -44,14 +59,15 @@ class VideoTranslationPipeline:
         self.final_output = Path(output_dir)
         self.work_dir = self.final_output / "internals"
 
-        # Define directory structure - Ajout des dossiers pour L1 et Mt
+        # Directory structure — numbered for step ordering.
+        # S1 = source anchor, L1 = literal legacy MT, Mt = LLM draft.
         self.dirs = {
-            "audio": self.work_dir / "1_audio",
-            "raw_srt": self.work_dir / "2_raw_srt",
-            "clean_srt": self.work_dir / "3_clean_srt",    # S1 (Anchor)
-            "legacy_mt": self.work_dir / "4_legacy_mt",   # L1 (Literal)
-            "llm_mt": self.work_dir / "5_llm_mt",         # Mt (Draft)
-            "final": self.final_output / "subtitles_ready"
+            "audio":      self.work_dir / "1_audio",
+            "raw_srt":    self.work_dir / "2_raw_srt",
+            "clean_srt":  self.work_dir / "3_clean_srt",     # S1 (source anchor)
+            "legacy_mt":  self.work_dir / "4_legacy_mt",     # L1 (literal reference)
+            "llm_mt":     self.work_dir / "5_llm_mt",        # Mt (LLM draft)
+            "final":      self.final_output / "subtitles_ready",
         }
         
         for name, path in self.dirs.items():
