@@ -126,9 +126,13 @@ class LLMTranslator(BaseTranslator):
                 self._checkpoint_file.unlink(missing_ok=True)
             self._checkpoint_file = None
 
-    def _translate_chunk(self, chunk: list[dict], idx: int, total: int) -> list[dict]:
+    def _translate_chunk(self, chunk: list[dict], idx: int, total: int, _attempt: int = 0) -> list[dict]:
         """
         Translate a single chunk, falling back to source on error.
+
+        After translation, validates that the output differs from
+        the source.  If the chunk appears untranslated, retries up
+        to ``max_chunk_retries`` times (config, default 2).
 
         Parameters
         ----------
@@ -138,6 +142,8 @@ class LLMTranslator(BaseTranslator):
             1-based chunk index (for logging).
         total : int
             Total number of chunks (for logging).
+        _attempt : int, optional
+            Internal retry counter (default 0).
 
         Returns
         -------
@@ -167,6 +173,21 @@ class LLMTranslator(BaseTranslator):
                     f"Chunk {idx}: LLM returned {len(translated_blocks)} blocks "
                     f"instead of {len(chunk)}."
                 )
+
+            # Validate: translated content must differ from source
+            if self._is_chunk_untranslated(chunk, translated_blocks):
+                max_retries = self.config.get("max_chunk_retries", 2)
+                if _attempt < max_retries:
+                    logger.warning(
+                        f"Chunk {idx}: translation identical to source. "
+                        f"Retrying ({_attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(self.chunk_delay)
+                    return self._translate_chunk(chunk, idx, total, _attempt + 1)
+                logger.warning(
+                    f"Chunk {idx}: still identical after {max_retries} retries. Keeping source."
+                )
+                return list(chunk)
 
             return translated_blocks
         except Exception as e:

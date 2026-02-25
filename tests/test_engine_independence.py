@@ -7,24 +7,14 @@ must not require FFmpeg or Whisper.
 """
 
 import json
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Stub deep_translator so legacy_translator can import without the real package.
-if "deep_translator" not in sys.modules:
-    sys.modules["deep_translator"] = MagicMock()
-
-# Stub Windows-only UI automation packages so copilot_ui can import on any env.
-for _mod_name in ("pywinauto", "pywinauto.keyboard", "win32api", "pyperclip"):
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = MagicMock()
-
-from modules.legacy_translator import LegacyTranslator  # noqa: E402
-from modules.llm_translator import LLMTranslator  # noqa: E402
-from modules.providers.base_provider import LLMProvider  # noqa: E402
-from modules.providers.llama_provider import LlamaCPPProvider  # noqa: E402
+from modules.legacy_translator import LegacyTranslator
+from modules.llm_translator import LLMTranslator
+from modules.providers.base_provider import LLMProvider
+from modules.providers.llama_provider import LlamaCPPProvider
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -292,7 +282,8 @@ class TestLLMUIEngineIndependence:
         # CopilotUIProvider should NOT be in main's namespace
         assert not hasattr(main, "CopilotUIProvider")
 
-    def test_ui_provider_used_only_when_requested(self, tmp_path):
+    @patch("modules.legacy_translator.GoogleTranslator")
+    def test_ui_provider_used_only_when_requested(self, mock_gt, tmp_path):
         """CopilotUIProvider is only loaded in _create_llm_ui_translator."""
         from main import VideoTranslationPipeline
 
@@ -339,7 +330,7 @@ class TestCreateTranslator:
             pipeline._create_translator("nonexistent")
 
     @patch("modules.legacy_translator.GoogleTranslator")
-    def test_legacy_factory(self, mock_gt, tmp_path):
+    def test_legacy_factory_outputs_to_intermediate(self, mock_gt, tmp_path):
         from main import VideoTranslationPipeline
 
         config_path = _write_config(tmp_path, FULL_CONFIG)
@@ -347,8 +338,9 @@ class TestCreateTranslator:
 
         translator = pipeline._create_translator("legacy")
         assert isinstance(translator, LegacyTranslator)
+        assert str(translator.output_dir) == str(pipeline.dirs["legacy_mt"])
 
-    def test_llm_local_factory(self, tmp_path):
+    def test_llm_local_factory_outputs_to_intermediate(self, tmp_path):
         from main import VideoTranslationPipeline
 
         config_path = _write_config(tmp_path, FULL_CONFIG)
@@ -357,15 +349,16 @@ class TestCreateTranslator:
         translator = pipeline._create_translator("llm-local")
         assert isinstance(translator, LLMTranslator)
         assert translator.name == "Local LLM"
+        assert str(translator.output_dir) == str(pipeline.dirs["llm_mt"])
 
-    def test_llm_ui_factory(self, tmp_path):
+    @patch("modules.providers.copilot_ui.Desktop")
+    def test_llm_ui_factory_outputs_to_intermediate(self, mock_desktop, tmp_path):
         from main import VideoTranslationPipeline
-        from modules.providers.copilot_ui import Desktop
 
         # Make the Desktop mock return a window matching "Edge"
         mock_window = MagicMock()
         mock_window.window_text.return_value = "Microsoft Edge"
-        Desktop.return_value.windows.return_value = [mock_window]
+        mock_desktop.return_value.windows.return_value = [mock_window]
 
         config_path = _write_config(tmp_path, FULL_CONFIG)
         pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
@@ -373,10 +366,11 @@ class TestCreateTranslator:
         translator = pipeline._create_translator("llm-ui")
         assert isinstance(translator, LLMTranslator)
         assert translator.name == "UI LLM translation"
+        assert str(translator.output_dir) == str(pipeline.dirs["llm_mt"])
 
 
 # ---------------------------------------------------------------------------
-# Hybrid Mt seeding (cross-engine reuse)
+# Promote to final (standalone engine → subtitles_ready/)
 # ---------------------------------------------------------------------------
 
 S1_CONTENT = (
@@ -390,83 +384,129 @@ TRANSLATED_CONTENT = (
 )
 
 
-class TestHybridMtSeeding:
-    """Hybrid should reuse previous engine output as Mt draft."""
+class TestPromoteToFinal:
+    """Standalone engines write to intermediate dirs, then promote to final."""
 
-    def test_seeds_mt_from_final_when_mt_empty(self, tmp_path):
-        """Previous llm-local output in subtitles_ready/ is copied to 5_llm_mt/."""
+    def test_legacy_promotes_to_final(self, tmp_path):
+        """Files from 4_legacy_mt/ are copied to subtitles_ready/."""
         from main import VideoTranslationPipeline
 
         config_path = _write_config(tmp_path, FULL_CONFIG)
         pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
 
-        # Simulate: S1 exists, final has translated output, Mt is empty
+        (pipeline.dirs["legacy_mt"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+
+        pipeline._promote_to_final("legacy")
+
+        promoted = pipeline.dirs["final"] / "video.srt"
+        assert promoted.exists()
+        assert "Bonjour" in promoted.read_text(encoding="utf-8")
+
+    def test_llm_local_promotes_to_final(self, tmp_path):
+        """Files from 5_llm_mt/ are copied to subtitles_ready/."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        (pipeline.dirs["llm_mt"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+
+        pipeline._promote_to_final("llm-local")
+
+        promoted = pipeline.dirs["final"] / "video.srt"
+        assert promoted.exists()
+        assert "Bonjour" in promoted.read_text(encoding="utf-8")
+
+    def test_llm_ui_promotes_to_final(self, tmp_path):
+        """llm-ui engine also promotes from 5_llm_mt/."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        (pipeline.dirs["llm_mt"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+
+        pipeline._promote_to_final("llm-ui")
+
+        assert (pipeline.dirs["final"] / "video.srt").exists()
+
+    def test_promote_noop_for_empty_dir(self, tmp_path):
+        """Promotion with no files in intermediate dir does nothing."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        pipeline._promote_to_final("legacy")
+
+        assert not any(pipeline.dirs["final"].iterdir())
+
+    def test_promote_overwrites_existing(self, tmp_path):
+        """Promotion overwrites stale files in final directory."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        (pipeline.dirs["final"] / "video.srt").write_text("old content", encoding="utf-8")
+        (pipeline.dirs["legacy_mt"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+
+        pipeline._promote_to_final("legacy")
+
+        assert "Bonjour" in (pipeline.dirs["final"] / "video.srt").read_text(encoding="utf-8")
+
+    def test_promote_noop_for_hybrid_engine(self, tmp_path):
+        """Hybrid engine has no intermediate dir — promote is a no-op."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        pipeline._promote_to_final("hybrid")  # should not raise
+
+    def test_promote_handles_subdirectories(self, tmp_path):
+        """Promotion preserves subdirectory structure."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        subdir = pipeline.dirs["legacy_mt"] / "season1"
+        subdir.mkdir()
+        (subdir / "ep01.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+
+        pipeline._promote_to_final("legacy")
+
+        assert (pipeline.dirs["final"] / "season1" / "ep01.srt").exists()
+
+
+class TestCrossEngineHybridReuse:
+    """Hybrid skips sub-steps when intermediate dirs already have output."""
+
+    def test_hybrid_reuses_legacy_and_llm_output(self, tmp_path):
+        """Scenario: legacy then llm-local, then hybrid reuses both."""
+        from main import VideoTranslationPipeline
+
+        config_path = _write_config(tmp_path, FULL_CONFIG)
+        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
+
+        # Simulate: S1 in clean_srt, L1 in legacy_mt, Mt in llm_mt
         (pipeline.dirs["clean_srt"] / "video.srt").write_text(S1_CONTENT, encoding="utf-8")
-        (pipeline.dirs["final"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+        (pipeline.dirs["legacy_mt"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
+        (pipeline.dirs["llm_mt"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
 
-        pipeline._seed_mt_from_previous_run()
+        # Both intermediate dirs are populated — verify they exist and are not empty
+        assert list(pipeline.dirs["legacy_mt"].glob("*.srt"))
+        assert list(pipeline.dirs["llm_mt"].glob("*.srt"))
 
-        seeded = pipeline.dirs["llm_mt"] / "video.srt"
-        assert seeded.exists()
-        assert "Bonjour" in seeded.read_text(encoding="utf-8")
-
-    def test_no_seed_when_mt_already_populated(self, tmp_path):
-        """If Mt already has files, seeding is skipped."""
+    def test_engine_dir_map_covers_all_standalone(self, tmp_path):
+        """ENGINE_DIR_MAP has entries for all non-hybrid engines."""
         from main import VideoTranslationPipeline
 
         config_path = _write_config(tmp_path, FULL_CONFIG)
         pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
 
-        # Mt already has a file
-        (pipeline.dirs["llm_mt"] / "existing.srt").write_text("existing", encoding="utf-8")
-        (pipeline.dirs["clean_srt"] / "video.srt").write_text(S1_CONTENT, encoding="utf-8")
-        (pipeline.dirs["final"] / "video.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
-
-        pipeline._seed_mt_from_previous_run()
-
-        # video.srt should NOT be copied (Mt already populated)
-        assert not (pipeline.dirs["llm_mt"] / "video.srt").exists()
-
-    def test_no_seed_when_final_empty(self, tmp_path):
-        """If final directory has no SRT files, nothing to seed."""
-        from main import VideoTranslationPipeline
-
-        config_path = _write_config(tmp_path, FULL_CONFIG)
-        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
-
-        (pipeline.dirs["clean_srt"] / "video.srt").write_text(S1_CONTENT, encoding="utf-8")
-
-        pipeline._seed_mt_from_previous_run()
-
-        assert not (pipeline.dirs["llm_mt"] / "video.srt").exists()
-
-    def test_no_seed_when_timestamps_mismatch(self, tmp_path):
-        """Files with mismatched timestamps are not seeded."""
-        from main import VideoTranslationPipeline
-
-        config_path = _write_config(tmp_path, FULL_CONFIG)
-        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
-
-        (pipeline.dirs["clean_srt"] / "video.srt").write_text(S1_CONTENT, encoding="utf-8")
-
-        # Different timestamps from S1
-        mismatched = "1\n00:00:10,000 --> 00:00:12,000\nBonjour\n"
-        (pipeline.dirs["final"] / "video.srt").write_text(mismatched, encoding="utf-8")
-
-        pipeline._seed_mt_from_previous_run()
-
-        assert not (pipeline.dirs["llm_mt"] / "video.srt").exists()
-
-    def test_no_seed_when_s1_missing(self, tmp_path):
-        """Files without a matching S1 source are not seeded."""
-        from main import VideoTranslationPipeline
-
-        config_path = _write_config(tmp_path, FULL_CONFIG)
-        pipeline = VideoTranslationPipeline(output_dir=str(tmp_path / "out"), config_path=config_path)
-
-        # No S1 file — only final
-        (pipeline.dirs["final"] / "orphan.srt").write_text(TRANSLATED_CONTENT, encoding="utf-8")
-
-        pipeline._seed_mt_from_previous_run()
-
-        assert not (pipeline.dirs["llm_mt"] / "orphan.srt").exists()
+        assert "legacy" in pipeline.ENGINE_DIR_MAP
+        assert "llm-local" in pipeline.ENGINE_DIR_MAP
+        assert "llm-ui" in pipeline.ENGINE_DIR_MAP
+        assert "hybrid" not in pipeline.ENGINE_DIR_MAP

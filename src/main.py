@@ -4,6 +4,7 @@ import logging
 import shutil
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 # --- Pipeline modules ---
 from modules.extractor import AudioExtractor
@@ -16,7 +17,6 @@ from modules.srt_optimizer import SRTOptimizer
 from modules.strategies.hybrid_refiner import HybridRefiner
 from modules.transcriber import WhisperTranscriber
 from modules.translator import BaseTranslator
-from utils.srt_handler import SRTHandler
 
 # --- Logging ---
 logging.basicConfig(
@@ -246,56 +246,53 @@ class VideoTranslationPipeline:
             else:
                 translator = self._create_translator(engine)
                 translator.run()
+                self._promote_to_final(engine)
 
             logger.info(f"Step 4/4: Completed. Final files: {self.dirs['final']}")
 
         logger.info("✨ ALL PIPELINE TASKS FINISHED SUCCESSFULLY! ✨")
 
-    def _seed_mt_from_previous_run(self) -> None:
-        """Copy previous engine output to Mt directory for hybrid reuse.
+    # Mapping from standalone engine name to its intermediate directory key.
+    ENGINE_DIR_MAP: ClassVar[dict[str, str]] = {
+        "legacy": "legacy_mt",
+        "llm-local": "llm_mt",
+        "llm-ui": "llm_mt",
+    }
 
-        When a previous non-hybrid engine run (e.g. ``llm-local``)
-        produced files in the final output directory, those can serve
-        as the Mt (LLM draft) input for the hybrid refiner.  This
-        avoids re-translating files that were already processed.
+    def _promote_to_final(self, engine: str) -> None:
+        """Copy translated files from the engine's intermediate dir to final.
 
-        Only seeds when the Mt directory (``5_llm_mt/``) contains no
-        SRT files and the final directory (``subtitles_ready/``) has
-        files whose timestamps match their S1 source.
+        After a standalone engine run, the output lives in the
+        engine's canonical intermediate directory (e.g.
+        ``4_legacy_mt/`` or ``5_llm_mt/``).  This method mirrors
+        those files into ``subtitles_ready/`` so they are available
+        as the pipeline's deliverable.
+
+        Existing files in the final directory are overwritten — the
+        latest engine run always takes precedence.
+
+        Parameters
+        ----------
+        engine : str
+            Engine name (``"legacy"``, ``"llm-local"``, ``"llm-ui"``).
         """
-        mt_dir = self.dirs["llm_mt"]
-        final_dir = self.dirs["final"]
-        s1_dir = self.dirs["clean_srt"]
-
-        if any(mt_dir.rglob("*.srt")):
-            return  # Mt already populated — skip seeding
-
-        final_files = list(final_dir.rglob("*.srt"))
-        if not final_files:
+        dir_key = self.ENGINE_DIR_MAP.get(engine)
+        if not dir_key:
             return
 
-        seeded = 0
-        for final_file in final_files:
-            relative = final_file.relative_to(final_dir)
-            s1_file = s1_dir / relative
-            mt_target = mt_dir / relative
+        source_dir = self.dirs[dir_key]
+        final_dir = self.dirs["final"]
+        promoted = 0
 
-            if not s1_file.exists():
-                continue
+        for srt_file in source_dir.rglob("*.srt"):
+            relative = srt_file.relative_to(source_dir)
+            target = final_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(srt_file, target)
+            promoted += 1
 
-            s1_ts = SRTHandler.extract_timestamps(s1_file)
-            final_ts = SRTHandler.extract_timestamps(final_file)
-
-            if s1_ts == final_ts and len(s1_ts) > 0:
-                mt_target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(final_file, mt_target)
-                seeded += 1
-
-        if seeded:
-            logger.info(
-                f"Seeded {seeded} Mt file(s) from previous translation output. "
-                f"LLM draft step will skip these files."
-            )
+        if promoted:
+            logger.info(f"Promoted {promoted} file(s) from {source_dir.name}/ to {final_dir.name}/.")
 
     def _run_hybrid_pipeline(self):
         """
@@ -305,14 +302,12 @@ class VideoTranslationPipeline:
         Mt (LLM draft via ``LLMTranslator``), then runs the
         ``HybridRefiner`` for triple-source arbitration.
 
-        If a previous engine run left files in the final output
-        directory, they are seeded into the Mt directory so the LLM
-        draft step can skip already-translated files.
+        If previous standalone engine runs already populated the
+        intermediate directories (``4_legacy_mt/``, ``5_llm_mt/``),
+        the corresponding sub-steps are skipped automatically by
+        ``BaseTranslator``'s timestamp-based skip logic.
         """
         logger.info("Starting Hybrid Protocol (Arbitration S1/L1/Mt)...")
-
-        # 0. Seed Mt from previous non-hybrid run (e.g. llm-local)
-        self._seed_mt_from_previous_run()
 
         # A. Generate L1 (Literal translation via Legacy)
         logger.info("Generating L1 (Literal)...")
@@ -398,7 +393,7 @@ class VideoTranslationPipeline:
         provider = LlamaCPPProvider(url=llm_url)
         return LLMTranslator(
             input_dir=str(self.dirs["clean_srt"]),
-            output_dir=str(self.dirs["final"]),
+            output_dir=str(self.dirs["llm_mt"]),
             provider=provider,
             config=self.config["llm_config"]
         )
@@ -427,7 +422,7 @@ class VideoTranslationPipeline:
         provider = CopilotUIProvider(window_title="Edge")
         return LLMTranslator(
             input_dir=str(self.dirs["clean_srt"]),
-            output_dir=str(self.dirs["final"]),
+            output_dir=str(self.dirs["llm_mt"]),
             provider=provider,
             config=self.config["llm_config"]
         )
@@ -444,7 +439,7 @@ class VideoTranslationPipeline:
         logger.info("Initializing Legacy Translator...")
         return LegacyTranslator(
             input_dir=str(self.dirs["clean_srt"]),
-            output_dir=str(self.dirs["final"]),
+            output_dir=str(self.dirs["legacy_mt"]),
             config=self.config
         )
 

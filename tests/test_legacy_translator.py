@@ -1,11 +1,4 @@
-import sys
 from unittest.mock import MagicMock, patch
-
-# deep_translator is not installed in the dev/CI environment.
-# Provide a stub module so that the import chain succeeds.
-if "deep_translator" not in sys.modules:
-    _dt_stub = MagicMock()
-    sys.modules["deep_translator"] = _dt_stub
 
 from modules.legacy_translator import LegacyTranslator
 from utils.srt_handler import SRTHandler

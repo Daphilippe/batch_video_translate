@@ -188,7 +188,7 @@ class LegacyTranslator(BaseTranslator):
                     final_lines.append(self.cache[l_hash])
                 else:
                     pre_treated = self._apply_dictionary(clean)
-                    to_translate.append((len(final_lines), pre_treated, l_hash))
+                    to_translate.append((len(final_lines), pre_treated, l_hash, clean))
                     final_lines.append(None)
 
         # 2. Batch translation
@@ -200,9 +200,9 @@ class LegacyTranslator(BaseTranslator):
             current_batch, current_meta, current_len = [], [], 0
 
             while i < len(to_translate) and current_len < max_chars:
-                idx, txt, h = to_translate[i]
+                idx, txt, h, orig = to_translate[i]
                 current_batch.append(txt)
-                current_meta.append((idx, h))
+                current_meta.append((idx, h, orig))
                 current_len += len(txt)
                 i += 1
 
@@ -210,7 +210,23 @@ class LegacyTranslator(BaseTranslator):
                 results = self._safe_translate_batch(current_batch)
                 # Safeguard: if batch fails, results might be empty
                 if results and len(results) == len(current_batch):
-                    for (idx, h), res in zip(current_meta, results):
+                    # Identify lines that appear untranslated (identical to source)
+                    untranslated = [
+                        j for j, ((_, _, orig), res) in enumerate(zip(current_meta, results))
+                        if res.strip().lower() == orig.strip().lower()
+                    ]
+                    if untranslated:
+                        logger.warning(
+                            f"Batch: {len(untranslated)}/{len(current_batch)} line(s) "
+                            f"appear untranslated. Retrying those lines..."
+                        )
+                        retry_texts = [current_batch[j] for j in untranslated]
+                        retry_results = self._safe_translate_batch(retry_texts)
+                        if retry_results and len(retry_results) == len(retry_texts):
+                            for k, j in enumerate(untranslated):
+                                results[j] = retry_results[k]
+
+                    for (idx, h, _), res in zip(current_meta, results):
                         final_lines[idx] = res
                         self.cache[h] = res
 

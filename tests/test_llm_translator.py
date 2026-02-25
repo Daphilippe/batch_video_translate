@@ -74,10 +74,10 @@ class TestLLMTranslatorLogic:
 
     def test_chunk_splitting(self, tmp_path):
         """Should split blocks into chunks of the configured size."""
-        config = {"source_lang": "English", "target_lang": "French", "chunk_size": 2}
+        config = {"source_lang": "English", "target_lang": "French", "chunk_size": 2, "chunk_delay": 0}
         provider = MockProvider(responses=[
-            "1\n00:00:01,000 --> 00:00:02,000\nA\n\n2\n00:00:03,000 --> 00:00:04,000\nB\n",
-            "3\n00:00:05,000 --> 00:00:06,000\nC\n",
+            "1\n00:00:01,000 --> 00:00:02,000\nX\n\n2\n00:00:03,000 --> 00:00:04,000\nY\n",
+            "3\n00:00:05,000 --> 00:00:06,000\nZ\n",
         ])
 
         translator = LLMTranslator(

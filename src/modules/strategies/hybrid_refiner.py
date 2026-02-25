@@ -491,25 +491,17 @@ class HybridRefiner(BaseTranslator):
             )
 
             try:
-                response = self.bot.ask(system_instructions, user_prompt)
-                refined_blocks = SRTHandler.parse_to_blocks(response)
-
-                if not refined_blocks:
-                    logger.warning(f"Window {i}: LLM returned empty/unparseable response. Keeping S1 source.")
+                refined_blocks = self._refine_window(
+                    s1_win, system_instructions, user_prompt,
+                    f"{i // step + 1}/{total_windows}",
+                )
+                if refined_blocks is None:
+                    logger.warning(
+                        f"Window [{i // step + 1}/{total_windows}] {win_label}: "
+                        f"keeping S1 source after failed refinement."
+                    )
                     final_blocks.extend(s1_win)
                     continue
-
-                if len(refined_blocks) != len(s1_win):
-                    logger.warning(
-                        f"Window {i}: LLM returned {len(refined_blocks)} blocks, "
-                        f"expected {len(s1_win)}. Forcing S1 timestamps onto result."
-                    )
-                    refined_blocks = self._force_align_to_s1(s1_win, refined_blocks)
-
-                # Always enforce S1 timestamps on the final output
-                for s1_blk, ref_blk in zip(s1_win, refined_blocks):
-                    ref_blk['start'] = s1_blk['start']
-                    ref_blk['end'] = s1_blk['end']
 
                 final_blocks.extend(refined_blocks)
             except Exception as e:
@@ -527,6 +519,70 @@ class HybridRefiner(BaseTranslator):
             )
 
         return SRTHandler.render_blocks(final_blocks)
+
+    # ------------------------------------------------------------------
+    # Window-level refinement with validation
+    # ------------------------------------------------------------------
+
+    def _refine_window(
+        self,
+        s1_win: list[dict],
+        system_instructions: str,
+        user_prompt: str,
+        win_label: str,
+    ) -> list[dict] | None:
+        """Refine a single window with validation and one retry on failure.
+
+        Sends the arbitration prompt to the LLM, validates that the
+        response is non-empty and differs from S1 source.  Retries
+        once if the result appears untranslated.
+
+        Parameters
+        ----------
+        s1_win : list of dict
+            S1 (source) blocks for the current window.
+        system_instructions : str
+            System-level refinement protocol.
+        user_prompt : str
+            Formatted arbitration prompt for this window.
+        win_label : str
+            Human-readable label for logging (e.g. ``"3/10"``).
+
+        Returns
+        -------
+        list of dict or None
+            Refined blocks with S1 timestamps enforced, or ``None``
+            if both attempts failed.
+        """
+        for attempt in range(2):
+            if attempt > 0:
+                time.sleep(self.chunk_delay)
+
+            response = self.bot.ask(system_instructions, user_prompt)
+            refined = SRTHandler.parse_to_blocks(response)
+
+            if not refined:
+                logger.warning(f"Window [{win_label}]: empty/unparseable LLM response (attempt {attempt + 1}).")
+                continue
+
+            if len(refined) != len(s1_win):
+                logger.warning(
+                    f"Window [{win_label}]: LLM returned {len(refined)} blocks, "
+                    f"expected {len(s1_win)}. Forcing S1 timestamps onto result."
+                )
+                refined = self._force_align_to_s1(s1_win, refined)
+
+            if self._is_chunk_untranslated(s1_win, refined):
+                logger.warning(f"Window [{win_label}]: refinement identical to source (attempt {attempt + 1}).")
+                continue
+
+            # Valid translation — enforce S1 timestamps
+            for s1_blk, ref_blk in zip(s1_win, refined):
+                ref_blk['start'] = s1_blk['start']
+                ref_blk['end'] = s1_blk['end']
+            return refined
+
+        return None
 
     # ------------------------------------------------------------------
     # Prompt construction
