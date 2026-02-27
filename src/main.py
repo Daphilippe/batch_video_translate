@@ -29,15 +29,33 @@ logger = logging.getLogger("VideoPipeline")
 class VideoTranslationPipeline:
     """Main orchestrator for the 4-step video translation pipeline.
 
-    Steps:
-        1. Audio extraction (FFmpeg segmentation)
-        2. Transcription   (Whisper.cpp, segment-aware)
-        3. SRT optimization (merge, clean, re-index)
-        4. Translation      (legacy | llm-local | llm-ui | hybrid)
+    Steps
+    -----
+    1. **Audio extraction** — FFmpeg segmentation.
+    2. **Transcription** — Whisper.cpp (segment-aware).
+    3. **SRT optimization** — merge, clean, re-index (S1).
+    4. **Translation** — legacy | llm-local | llm-ui | hybrid.
 
     The hybrid engine performs triple-source arbitration:
-        S1 (source SRT) + L1 (Google Translate literal) + Mt (LLM draft)
-        → HybridRefiner with incremental re-run support.
+    S1 (source SRT) + L1 (Google Translate literal) + Mt (LLM draft)
+    → ``HybridRefiner`` with incremental re-run support.
+
+    Parameters
+    ----------
+    output_dir : str
+        Root directory for all pipeline outputs.  An ``internals/``
+        subfolder is created for intermediate artefacts.
+    config_path : str, optional
+        Path to the JSON configuration file
+        (default ``"configs/settings.json"``).
+
+    Raises
+    ------
+    ValueError
+        If the configuration file is missing or contains invalid JSON,
+        or if required config keys are absent.
+    FileNotFoundError
+        If FFmpeg, Whisper binary, or Whisper model are not found.
     """
 
     def __init__(self, output_dir: str, config_path: str = "configs/settings.json"):
@@ -72,7 +90,15 @@ class VideoTranslationPipeline:
             path.mkdir(parents=True, exist_ok=True)
 
     def _validate_config(self) -> None:
-        """Validates that required configuration sections and keys are present."""
+        """
+        Validate that required configuration sections and keys exist.
+
+        Raises
+        ------
+        ValueError
+            If a required section or key is missing from the
+            loaded configuration dict.
+        """
         required_keys = {
             "whisper": ["bin_path", "model_path"],
             "llm_config": ["source_lang", "target_lang"],
@@ -85,7 +111,17 @@ class VideoTranslationPipeline:
                     raise ValueError(f"Missing required config key: '{section}.{key}'")
 
     def _validate_binaries(self) -> None:
-        """Validates that required external binaries are accessible."""
+        """
+        Validate that required external binaries are accessible.
+
+        Checks for FFmpeg in ``PATH``, and the Whisper binary and
+        model at the paths specified in the configuration.
+
+        Raises
+        ------
+        FileNotFoundError
+            If any required binary or model file cannot be located.
+        """
         # Validate FFmpeg
         if not shutil.which("ffmpeg"):
             raise FileNotFoundError(
@@ -107,7 +143,22 @@ class VideoTranslationPipeline:
             )
 
     def _get_file_count(self, path, extension):
-        """Helper to count files or directories for progress tracking."""
+        """
+        Count files (or subdirectories) in a directory.
+
+        Parameters
+        ----------
+        path : Path
+            Directory to scan.
+        extension : str or tuple of str or ``"dir"``
+            If ``"dir"``, counts subdirectories.  Otherwise,
+            counts files whose suffix matches.
+
+        Returns
+        -------
+        int
+            Number of matching items, or 0 if *path* does not exist.
+        """
         if not path.exists():
             return 0
         if extension == "dir":
@@ -115,7 +166,21 @@ class VideoTranslationPipeline:
         return len([f for f in path.iterdir() if f.suffix.lower() in extension])
 
     def run(self, input_dir, mode="full", engine="llm"):
-        """Runs the full transcription/translation pipeline."""
+        """
+        Run the transcription / translation pipeline.
+
+        Parameters
+        ----------
+        input_dir : str
+            Path to the folder containing source video files.
+        mode : str, optional
+            Pipeline scope: ``"full"`` (default), ``"extract"``,
+            ``"transcribe"``, ``"optimize"``, or ``"translate"``.
+        engine : str, optional
+            Translation engine to use: ``"llm"`` (default),
+            ``"llm-local"``, ``"llm-ui"``, ``"legacy"``, or
+            ``"hybrid"``.
+        """
         input_path = Path(input_dir)
         if not input_path.exists():
             logger.error(f"Input directory not found: {input_path}")
@@ -169,7 +234,13 @@ class VideoTranslationPipeline:
         logger.info("✨ ALL PIPELINE TASKS FINISHED SUCCESSFULLY! ✨")
 
     def _run_hybrid_pipeline(self):
-        """Runs the full hybrid protocol: L1 (Legacy) + Mt (LLM Draft) → Refiner."""
+        """
+        Execute the full hybrid protocol.
+
+        Sequentially generates L1 (literal via ``LegacyTranslator``),
+        Mt (LLM draft via ``LLMTranslator``), then runs the
+        ``HybridRefiner`` for triple-source arbitration.
+        """
         logger.info("Starting Hybrid Protocol (Arbitration S1/L1/Mt)...")
 
         # A. Generate L1 (Literal translation via Legacy)
@@ -211,7 +282,24 @@ class VideoTranslationPipeline:
         refiner.run()
 
     def _create_translator(self, engine: str) -> BaseTranslator:
-        """Factory method for translator engine creation."""
+        """
+        Instantiate the appropriate translator for the given engine.
+
+        Parameters
+        ----------
+        engine : str
+            One of ``"llm-local"``, ``"llm-ui"``, ``"legacy"``.
+
+        Returns
+        -------
+        BaseTranslator
+            Configured translator instance.
+
+        Raises
+        ------
+        ValueError
+            If *engine* is not a recognised engine name.
+        """
         engine_factories = {
             "llm-local": self._create_llm_local_translator,
             "llm-ui": self._create_llm_ui_translator,
@@ -225,6 +313,14 @@ class VideoTranslationPipeline:
         return factory()
 
     def _create_llm_local_translator(self) -> LLMTranslator:
+        """
+        Create an ``LLMTranslator`` backed by a local llama.cpp server.
+
+        Returns
+        -------
+        LLMTranslator
+            Translator configured with ``LlamaCPPProvider``.
+        """
         logger.info("Initializing Local LLM Provider (llama.cpp)...")
         provider = LlamaCPPProvider()
         return LLMTranslator(
@@ -235,6 +331,14 @@ class VideoTranslationPipeline:
         )
 
     def _create_llm_ui_translator(self) -> LLMTranslator:
+        """
+        Create an ``LLMTranslator`` backed by browser UI automation.
+
+        Returns
+        -------
+        LLMTranslator
+            Translator configured with ``CopilotUIProvider``.
+        """
         logger.info("Initializing UI Automation Provider...")
         provider = CopilotUIProvider(window_title="Edge")
         return LLMTranslator(
@@ -245,6 +349,14 @@ class VideoTranslationPipeline:
         )
 
     def _create_legacy_translator(self) -> LegacyTranslator:
+        """
+        Create a ``LegacyTranslator`` using Google Translate.
+
+        Returns
+        -------
+        LegacyTranslator
+            Translator configured from the pipeline settings.
+        """
         logger.info("Initializing Legacy Translator...")
         return LegacyTranslator(
             input_dir=str(self.dirs["clean_srt"]),

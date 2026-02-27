@@ -10,9 +10,24 @@ logger = logging.getLogger(__name__)
 
 class LLMTranslator(BaseTranslator):
     """
-    Standalone LLM translator: splits SRT into chunks, sends each to the provider,
-    and reassembles the result. Works through BaseTranslator.process_file() which
-    handles skip logic, standardization, and wait_for_stability.
+    Standalone LLM translator with chunked processing.
+
+    Splits SRT content into manageable chunks, sends each to an
+    ``LLMProvider``, and reassembles the translated result.
+    Inherits the file-level orchestration from ``BaseTranslator``
+    (skip logic, standardization, disk-write stability).
+
+    Parameters
+    ----------
+    input_dir : str
+        Directory containing source ``.srt`` files.
+    output_dir : str
+        Directory where translated ``.srt`` files are written.
+    provider : LLMProvider
+        Backend that implements ``ask(content, prompt) -> str``.
+    config : dict
+        Translation settings (``chunk_size``, ``chunk_delay``,
+        ``prompt_file``, ``source_lang``, ``target_lang``, …).
     """
     def __init__(self, input_dir: str, output_dir: str, provider: LLMProvider, config: dict):
         super().__init__(input_dir, output_dir, extensions=(".srt",))
@@ -24,7 +39,24 @@ class LLMTranslator(BaseTranslator):
         self.system_instructions = self._load_custom_prompt(config)
 
     def _load_custom_prompt(self, config: dict) -> str:
-        """Reads the prompt from a text file and formats it with languages."""
+        """
+        Load and format the system prompt template from a text file.
+
+        Reads the prompt file specified in *config* and substitutes
+        ``{source_lang}`` / ``{target_lang}`` placeholders.  Falls
+        back to a minimal inline template if the file is missing.
+
+        Parameters
+        ----------
+        config : dict
+            Must contain ``prompt_file``, ``source_lang``, and
+            ``target_lang`` keys.
+
+        Returns
+        -------
+        str
+            Formatted system instructions for the LLM.
+        """
         prompt_path = Path(config.get("prompt_file", "configs/system_prompt.txt"))
         if not prompt_path.exists():
             logger.warning(f"Prompt file not found at {prompt_path}. Using fallback.")
@@ -39,11 +71,50 @@ class LLMTranslator(BaseTranslator):
         )
 
     def _split_into_chunks(self, blocks: list[dict]) -> list[list[dict]]:
-        """Groups SRT blocks into manageable chunks for the LLM context window."""
+        """
+        Group SRT blocks into fixed-size chunks.
+
+        Each chunk is a contiguous slice of *blocks* whose length
+        does not exceed ``self.chunk_size``.
+
+        Parameters
+        ----------
+        blocks : list of dict
+            Parsed SRT blocks.
+
+        Returns
+        -------
+        list of list of dict
+            Ordered list of block chunks.
+
+        Examples
+        --------
+        >>> t = LLMTranslator.__new__(LLMTranslator)
+        >>> t.chunk_size = 2
+        >>> t._split_into_chunks([{'a': 1}, {'a': 2}, {'a': 3}])
+        [[{'a': 1}, {'a': 2}], [{'a': 3}]]
+        """
         return [blocks[i : i + self.chunk_size] for i in range(0, len(blocks), self.chunk_size)]
 
     def translate_logic(self, text: str) -> str:
-        """Core orchestration: SRT -> Blocks -> Chunks -> LLM -> Merged SRT"""
+        """
+        Translate full SRT content via chunked LLM calls.
+
+        Pipeline: parse SRT → split into chunks → send each chunk
+        to the provider → parse response → concatenate all blocks
+        → render back to SRT.  On provider or parse failure, the
+        source chunk is kept unchanged.
+
+        Parameters
+        ----------
+        text : str
+            Raw SRT file content.
+
+        Returns
+        -------
+        str
+            Translated SRT content (un-standardized).
+        """
         all_blocks = SRTHandler.parse_to_blocks(text)
         chunks = self._split_into_chunks(all_blocks)
 

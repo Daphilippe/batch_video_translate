@@ -10,6 +10,34 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class WhisperTranscriber(DirectoryMirrorTask):
+    """Whisper.cpp-based audio-to-SRT transcriber with segment caching.
+
+    Processes folders of WAV audio chunks (produced by
+    ``AudioExtractor``), transcribes each segment via the
+    Whisper.cpp binary, applies a time offset to realign
+    timestamps, and merges all segments into a single SRT file.
+
+    Parameters
+    ----------
+    input_dir : str
+        Root directory containing per-video segment folders.
+    output_dir : str
+        Directory where merged ``.srt`` files are written.
+    whisper_bin : str
+        Path to the Whisper.cpp executable.
+    model_path : str
+        Path to the Whisper GGML model file.
+    lang : str, optional
+        Language code for Whisper (default ``"auto"``).
+    segment_time : int, optional
+        Duration of each audio segment in seconds (default 600).
+        Must match the value used in ``AudioExtractor``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *whisper_bin* or *model_path* does not exist.
+    """
     def __init__(self, input_dir: str, output_dir: str, whisper_bin: str, model_path: str, lang: str = "auto", segment_time: int = 600):
         super().__init__(input_dir, output_dir, extensions=("",))
         self.whisper_bin = Path(whisper_bin)
@@ -24,6 +52,23 @@ class WhisperTranscriber(DirectoryMirrorTask):
             raise FileNotFoundError(f"Whisper model not found at: {self.model_path}")
 
     def _get_short_path(self, path: Path) -> str:
+        """
+        Obtain the Windows 8.3 short path for a given path.
+
+        Required because Whisper.cpp may not handle paths with
+        non-ASCII characters.  Returns the path unchanged on
+        non-Windows systems or if the API call fails.
+
+        Parameters
+        ----------
+        path : Path
+            File-system path to shorten.
+
+        Returns
+        -------
+        str
+            Short (8.3) path on Windows, or the original string.
+        """
         if os.name != 'nt':
             return str(path)
         buf = ctypes.create_unicode_buffer(260)
@@ -31,6 +76,12 @@ class WhisperTranscriber(DirectoryMirrorTask):
         return buf.value if res != 0 else str(path)
 
     def run(self):
+        """
+        Iterate over per-video segment folders and transcribe each.
+
+        Overrides the base ``run`` because the input structure is
+        folder-based (one folder per video) rather than flat files.
+        """
         input_path = Path(self.input_dir)
         if not input_path.exists():
             return
@@ -39,6 +90,18 @@ class WhisperTranscriber(DirectoryMirrorTask):
             self.process_file(folder)
 
     def process_file(self, input_file: Path):  # pylint: disable=arguments-renamed
+        """
+        Transcribe all audio segments in a video folder.
+
+        For each ``part*.wav`` segment, runs Whisper.cpp, shifts
+        timestamps by the segment offset, caches the realigned SRT,
+        and finally merges all segments into a single output file.
+
+        Parameters
+        ----------
+        input_file : Path
+            Path to the per-video segment folder (not a single file).
+        """
         final_srt_path = Path(self.output_dir) / f"{input_file.name}.srt"
         # Temporary folder for realigned segments
         cache_dir = input_file / "srt_cache"

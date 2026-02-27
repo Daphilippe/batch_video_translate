@@ -13,11 +13,23 @@ from utils.srt_handler import SRTHandler
 logger = logging.getLogger(__name__)
 
 class LegacyTranslator(BaseTranslator):
-    """Google Translate batch translator with line-level caching and
-    technical dictionary pre-processing.
+    """Google Translate batch translator with line-level caching.
 
-    Expects ``config["translation"]`` to contain source_lang, target_lang,
-    cache_file, and batch tuning parameters.
+    Translates SRT files line-by-line through ``deep_translator``,
+    applying a technical dictionary for pre-processing and
+    maintaining a persistent JSON cache to avoid re-translating
+    identical lines across runs.
+
+    Parameters
+    ----------
+    input_dir : str
+        Directory containing source ``.srt`` files.
+    output_dir : str
+        Directory where translated ``.srt`` files are written.
+    config : dict
+        Full pipeline config; expects ``config["translation"]``
+        with ``source_lang``, ``target_lang``, ``cache_file``,
+        and batch tuning parameters.
     """
 
     def __init__(self, input_dir: str, output_dir: str, config: dict):
@@ -39,6 +51,17 @@ class LegacyTranslator(BaseTranslator):
         self.name = "Legacy translation"
 
     def _load_cache(self):
+        """
+        Load the translation cache from disk.
+
+        Reads the JSON file at ``self.cache_path``.  Returns an
+        empty dict if the file is missing or malformed.
+
+        Returns
+        -------
+        dict
+            Mapping of SHA-256 line hashes to cached translations.
+        """
         if self.cache_path.exists():
             try:
                 with open(self.cache_path, encoding="utf-8") as f:
@@ -48,19 +71,60 @@ class LegacyTranslator(BaseTranslator):
         return {}
 
     def save_cache(self):
-        """Persists the translation cache to disk."""
+        """
+        Persist the translation cache to disk.
+
+        Writes ``self.cache`` as indented JSON to ``self.cache_path``,
+        creating parent directories if needed.
+        """
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.cache_path, "w", encoding="utf-8") as f:
             json.dump(self.cache, f, ensure_ascii=False, indent=2)
 
     def _apply_dictionary(self, text: str) -> str:
+        """
+        Replace technical terms using the configured dictionary.
+
+        Matches are case-insensitive and processed longest-first
+        to avoid partial replacements.  Each matched term is
+        wrapped in parentheses in the output.
+
+        Parameters
+        ----------
+        text : str
+            Source text line to pre-process.
+
+        Returns
+        -------
+        str
+            Text with dictionary terms replaced.
+        """
         t = text.lower()
         for key, val in self.tech_dict:
             t = t.replace(key.lower(), f"({val})")
         return t
 
     def _safe_translate_batch(self, batch: list, _retries: int = 0) -> list:
-        """Secure translation with rate-limit (429) handling and retry cap."""
+        """
+        Translate a batch of text lines via Google Translate.
+
+        Lines are joined with ``" ||| "`` for a single API call,
+        then split back.  Handles HTTP 429 (rate-limit) by
+        sleeping and retrying up to ``max_retries`` times.
+
+        Parameters
+        ----------
+        batch : list of str
+            Lines to translate in one request.
+        _retries : int, optional
+            Internal retry counter (default 0).
+
+        Returns
+        -------
+        list of str
+            Translated lines (same length as *batch*), or an empty
+            list on unrecoverable failure.
+        """
         max_retries = self.config.get("translation", {}).get("max_retries", 5)
         query = " ||| ".join(batch)
         try:
@@ -81,7 +145,25 @@ class LegacyTranslator(BaseTranslator):
             return []
 
     def translate_logic(self, text: str):
-        """Processes SRT text, checks line-cache, and translates in batches."""
+        """
+        Translate full SRT content line-by-line with caching.
+
+        Separates structural lines (indices, timestamps, blanks)
+        from text lines.  Cached translations are reused; the
+        remainder is sent in batches respecting
+        ``max_chars_batch``.
+
+        Parameters
+        ----------
+        text : str
+            Raw SRT file content.
+
+        Returns
+        -------
+        str
+            Translated SRT content.  Lines that failed translation
+            are replaced with ``"..."``.
+        """
         lines = text.splitlines()
         final_lines = []
         to_translate = []

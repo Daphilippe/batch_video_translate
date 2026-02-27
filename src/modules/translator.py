@@ -10,9 +10,19 @@ logger = logging.getLogger(__name__)
 class BaseTranslator(DirectoryMirrorTask):
     """Abstract base class for all translation engines.
 
-    Provides the file-level orchestration loop (skip logic, SRT
-    standardization, disk-write stability check).  Subclasses must
-    implement ``translate_logic(text) -> str``.
+    Provides file-level orchestration: skip logic (timestamp-based
+    structural comparison), SRT standardization of translated output,
+    and disk-write stability check.  Subclasses must implement
+    ``translate_logic(text) -> str``.
+
+    Parameters
+    ----------
+    input_dir : str
+        Directory containing source ``.srt`` files.
+    output_dir : str
+        Directory where translated ``.srt`` files are written.
+    extensions : tuple of str, optional
+        File extensions to process (default ``(".srt",)``).
     """
 
     def __init__(self, input_dir: str, output_dir: str, extensions: tuple = (".srt",)):
@@ -21,9 +31,23 @@ class BaseTranslator(DirectoryMirrorTask):
 
     def wait_for_stability(self, path: Path, timeout: int = 10) -> bool:
         """
-        Ensures the file is fully written to disk before proceeding.
-        Useful on Windows where antivirus/indexers may hold file locks,
-        or when I/O is slow on network-mounted drives.
+        Wait until a file's size stabilizes on disk.
+
+        Useful on Windows where antivirus / indexers may hold file
+        locks, or when I/O is slow on network-mounted drives.
+
+        Parameters
+        ----------
+        path : Path
+            Path to the file to monitor.
+        timeout : int, optional
+            Maximum wait time in seconds (default 10).
+
+        Returns
+        -------
+        bool
+            ``True`` if the file size stabilized before *timeout*,
+            ``False`` otherwise.
         """
         start = time.time()
         last_size = -1
@@ -37,6 +61,19 @@ class BaseTranslator(DirectoryMirrorTask):
         return False
 
     def process_file(self, input_file: Path) -> None:
+        """
+        Orchestrate the translation of a single SRT file.
+
+        Performs skip detection (timestamp structural comparison),
+        reads source content, delegates to ``translate_logic``,
+        standardizes the output, writes it to disk, and waits for
+        file stability.
+
+        Parameters
+        ----------
+        input_file : Path
+            Path to the source ``.srt`` file.
+        """
         output_file = self.get_output_path(input_file, ".srt")
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -75,5 +112,25 @@ class BaseTranslator(DirectoryMirrorTask):
         logger.info(f"[DONE] {output_file.name} in {duration:.2f} minutes.")
 
     def translate_logic(self, text: str) -> str:
-        """To be implemented by specific translation modules."""
+        """
+        Translate raw SRT content.
+
+        Must be implemented by concrete subclasses (``LLMTranslator``,
+        ``LegacyTranslator``).
+
+        Parameters
+        ----------
+        text : str
+            Full SRT file content to translate.
+
+        Returns
+        -------
+        str
+            Translated SRT content (may still need standardization).
+
+        Raises
+        ------
+        NotImplementedError
+            Always, unless overridden by a subclass.
+        """
         raise NotImplementedError

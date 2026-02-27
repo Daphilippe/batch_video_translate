@@ -8,13 +8,44 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class SRTHandler:
+    """Stateless SRT subtitle file manipulation toolkit.
+
+    Provides static and class methods for parsing, rendering,
+    cleaning, hashing, and aligning SRT subtitle blocks.
+    All methods are side-effect-free (no file I/O except
+    ``extract_timestamps``).
+    """
+
     TIMESTAMP_RE = re.compile(r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}")
 
     @staticmethod
     def shift_timestamp(ts_str: str, offset_seconds: int) -> str:
         """
-        Adds offset_seconds to an SRT timestamp string (00:00:00,000).
-        Used to realign segmented audio transcripts.
+        Add a time offset to an SRT timestamp string.
+
+        Used to realign segmented audio transcripts after
+        Whisper processes each audio chunk independently.
+
+        Parameters
+        ----------
+        ts_str : str
+            Timestamp in SRT format ``HH:MM:SS,mmm``.
+        offset_seconds : int
+            Number of seconds to add (can be negative).
+
+        Returns
+        -------
+        str
+            Shifted timestamp in the same ``HH:MM:SS,mmm`` format.
+            Returns the original string unchanged if it cannot be parsed.
+
+        Examples
+        --------
+        >>> SRTHandler.shift_timestamp("00:00:05,000", 10)
+        '00:00:15,000'
+
+        >>> SRTHandler.shift_timestamp("00:09:50,500", 600)
+        '00:19:50,500'
         """
         # Parse the HH:MM:SS,mmm format
         match = re.match(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})", ts_str.strip())
@@ -38,7 +69,35 @@ class SRTHandler:
 
     @classmethod
     def apply_offset_to_blocks(cls, blocks: list[dict], offset_seconds: int) -> list[dict]:
-        """Applies a time offset to a list of parsed SRT blocks (returns new copies)."""
+        """
+        Apply a time offset to a list of parsed SRT blocks.
+
+        Returns new block copies with shifted timestamps.
+        Blocks missing ``start`` or ``end`` keys are silently skipped
+        with a warning.
+
+        Parameters
+        ----------
+        blocks : list of dict
+            Parsed SRT blocks (each with ``start``, ``end``, ``text``).
+        offset_seconds : int
+            Seconds to add to every timestamp.
+
+        Returns
+        -------
+        list of dict
+            New block dicts with adjusted timestamps.
+
+        Examples
+        --------
+        >>> blocks = [{"index": 1, "start": "00:00:01,000",
+        ...            "end": "00:00:03,000", "text": ["Hi"]}]
+        >>> SRTHandler.apply_offset_to_blocks(blocks, 60)
+        [{'index': 1, 'start': '00:01:01,000', 'end': '00:01:03,000', 'text': ['Hi']}]
+
+        >>> SRTHandler.apply_offset_to_blocks(blocks, 0)
+        [{'index': 1, 'start': '00:00:01,000', 'end': '00:00:03,000', 'text': ['Hi']}]
+        """
         if offset_seconds == 0:
             return blocks
 
@@ -59,7 +118,33 @@ class SRTHandler:
 
     @staticmethod
     def clean_text(text: str) -> str:
-        """Removes LLM artifacts (bold markers, special chars, extra whitespace)."""
+        """
+        Remove common LLM artifacts from subtitle text.
+
+        Strips bold markers (``**``), replaces box-drawing characters
+        with dashes, normalizes ellipsis, and collapses whitespace.
+
+        Parameters
+        ----------
+        text : str
+            Raw text potentially containing LLM formatting artifacts.
+
+        Returns
+        -------
+        str
+            Cleaned text with artifacts removed.
+
+        Examples
+        --------
+        >>> SRTHandler.clean_text("**Hello** world")
+        'Hello world'
+
+        >>> SRTHandler.clean_text("Multiple   spaces   here")
+        'Multiple spaces here'
+
+        >>> SRTHandler.clean_text("Item □ one ▪ two")
+        'Item - one - two'
+        """
         replacements = {"**": "", "□": "-", "▪": "-", "…": "..."}
         for bad, good in replacements.items():
             text = text.replace(bad, good)
@@ -67,7 +152,32 @@ class SRTHandler:
 
     @staticmethod
     def canonicalize(text: str) -> str:
-        """Normalizes text for deterministic hashing (NFC, strip BOM/zero-width)."""
+        """
+        Normalize text for deterministic hashing.
+
+        Applies NFC Unicode normalization, removes BOM and
+        zero-width characters, normalizes line endings, strips
+        trailing whitespace per line, and ensures a single
+        trailing newline.
+
+        Parameters
+        ----------
+        text : str
+            Raw text to canonicalize.
+
+        Returns
+        -------
+        str
+            Canonical form suitable for reproducible hashing.
+
+        Examples
+        --------
+        >>> SRTHandler.canonicalize("Hello ") == SRTHandler.canonicalize("Hello")
+        True
+
+        >>> SRTHandler.canonicalize("Hello").endswith("\\n")
+        True
+        """
         text = unicodedata.normalize("NFC", text)
         text = text.lstrip("\ufeff") # Remove BOM
         for ch in ["\u200b", "\u200c", "\u200d", "\xa0"]:
@@ -77,12 +187,53 @@ class SRTHandler:
 
     @classmethod
     def get_hash(cls, text: str) -> str:
-        """Returns a SHA-256 hash of the canonicalized text."""
+        """
+        Compute a SHA-256 hash of the canonicalized text.
+
+        Uses ``canonicalize`` first so that cosmetically different
+        inputs (trailing spaces, BOM, etc.) produce the same hash.
+
+        Parameters
+        ----------
+        text : str
+            Text to hash.
+
+        Returns
+        -------
+        str
+            64-character lowercase hexadecimal SHA-256 digest.
+
+        Examples
+        --------
+        >>> len(SRTHandler.get_hash("Hello"))
+        64
+
+        >>> SRTHandler.get_hash("Hello") == SRTHandler.get_hash("Hello ")
+        True
+        """
         return hashlib.sha256(cls.canonicalize(text).encode("utf-8")).hexdigest()
 
     @classmethod
     def extract_timestamps(cls, path: Path) -> list[str]:
-        """Extracts all valid timestamp lines from an SRT file."""
+        """
+        Extract all valid timestamp lines from an SRT file.
+
+        Reads the file at *path* and returns every line matching the
+        SRT timestamp pattern ``HH:MM:SS,mmm --> HH:MM:SS,mmm``.
+        Used for structural comparison between source and translated
+        files (skip-logic in ``BaseTranslator``).
+
+        Parameters
+        ----------
+        path : Path
+            Path to the ``.srt`` file.
+
+        Returns
+        -------
+        list of str
+            Stripped timestamp lines, in file order.
+            Empty list if the file does not exist.
+        """
         if not path.exists():
             return []
         with open(path, encoding="utf-8") as f:
@@ -90,7 +241,33 @@ class SRTHandler:
 
     @staticmethod
     def parse_to_blocks(content: str) -> list:
-        """Parses SRT content with aggressive cleaning of LLM artifacts."""
+        """
+        Parse raw SRT content into a list of block dicts.
+
+        Applies aggressive cleaning of LLM artifacts (fenced code
+        blocks, wrapping quotes) during parsing.  Each block dict
+        has keys ``index`` (int), ``start`` (str), ``end`` (str),
+        and ``text`` (list of str).
+
+        Parameters
+        ----------
+        content : str
+            Raw SRT content (may contain LLM markdown artifacts).
+
+        Returns
+        -------
+        list of dict
+            Parsed blocks in file order.
+
+        Examples
+        --------
+        >>> blocks = SRTHandler.parse_to_blocks(
+        ...     "1\\n00:00:01,000 --> 00:00:03,000\\nHello world\\n")
+        >>> blocks[0]['index']
+        1
+        >>> blocks[0]['text']
+        ['Hello world']
+        """
         content = re.sub(r"```[a-z]*", "", content)
         content = content.replace("```", "")
 
@@ -135,7 +312,36 @@ class SRTHandler:
 
     @staticmethod
     def merge_identical_blocks(blocks: list) -> list:
-        """Merges consecutive blocks if the text is identical."""
+        """
+        Merge consecutive blocks that share identical text.
+
+        When two adjacent blocks have the same text content, they are
+        collapsed into a single block spanning from the first block's
+        ``start`` to the last block's ``end``.
+
+        Parameters
+        ----------
+        blocks : list of dict
+            Parsed SRT blocks (each with ``start``, ``end``, ``text``).
+
+        Returns
+        -------
+        list of dict
+            Merged blocks with ``text`` stored as a plain string.
+
+        Examples
+        --------
+        >>> blocks = [
+        ...     {"start": "00:00:01,000", "end": "00:00:02,000", "text": ["Hi"]},
+        ...     {"start": "00:00:02,000", "end": "00:00:03,000", "text": ["Hi"]},
+        ...     {"start": "00:00:03,000", "end": "00:00:04,000", "text": ["Bye"]},
+        ... ]
+        >>> merged = SRTHandler.merge_identical_blocks(blocks)
+        >>> len(merged)
+        2
+        >>> merged[0]['end']
+        '00:00:03,000'
+        """
         merged = []
         prev = None
 
@@ -150,7 +356,33 @@ class SRTHandler:
 
     @staticmethod
     def render_blocks(blocks: list) -> str:
-        """Converts blocks back into a valid SRT string."""
+        """
+        Convert a list of block dicts into a valid SRT string.
+
+        Blocks are re-indexed sequentially starting from 1,
+        regardless of their original ``index`` values.
+
+        Parameters
+        ----------
+        blocks : list of dict
+            Blocks with ``start``, ``end``, and ``text`` keys.
+            ``text`` may be a list of str or a plain str.
+
+        Returns
+        -------
+        str
+            Formatted SRT content ready to be written to a file.
+
+        Examples
+        --------
+        >>> blocks = [{"start": "00:00:01,000", "end": "00:00:03,000",
+        ...            "text": ["Hello world"]}]
+        >>> print(SRTHandler.render_blocks(blocks))
+        1
+        00:00:01,000 --> 00:00:03,000
+        Hello world
+        <BLANKLINE>
+        """
         out = []
         for i, b in enumerate(blocks, start=1):
             if isinstance(b['text'], list):
@@ -168,8 +400,27 @@ class SRTHandler:
     @classmethod
     def standardize(cls, content: str) -> str:
         """
-        Full post-processing pipeline:
-        Parse -> Merge Identical -> Clean Empty -> Re-index -> Render
+        Apply the full SRT post-processing pipeline.
+
+        Sequentially: parse → merge identical consecutive blocks →
+        remove empty / malformed blocks → clean LLM artifacts →
+        re-index → render.
+
+        Parameters
+        ----------
+        content : str
+            Raw SRT content (possibly produced by an LLM).
+
+        Returns
+        -------
+        str
+            Clean, well-formed SRT string.
+
+        Examples
+        --------
+        >>> raw = "1\\n00:00:01,000 --> 00:00:02,000\\n**Hello**\\n"
+        >>> "**" in SRTHandler.standardize(raw)
+        False
         """
         # 1. Parse raw string to blocks
         blocks = cls.parse_to_blocks(content)
@@ -191,19 +442,69 @@ class SRTHandler:
 
     @staticmethod
     def timestamp_to_seconds(ts: str) -> float:
-        """Convert SRT timestamp to total seconds."""
+        """
+        Convert an SRT timestamp to total seconds.
+
+        Parameters
+        ----------
+        ts : str
+            Timestamp in ``HH:MM:SS,mmm`` format.
+
+        Returns
+        -------
+        float
+            Equivalent time in fractional seconds.
+
+        Examples
+        --------
+        >>> SRTHandler.timestamp_to_seconds("00:01:30,500")
+        90.5
+
+        >>> SRTHandler.timestamp_to_seconds("01:00:00,000")
+        3600.0
+        """
         h, m, s_ms = ts.split(':')
         s, ms = s_ms.split(',')
         return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
 
     @classmethod
     def get_blocks_in_range(cls, blocks: list, start_sec: float, end_sec: float, margin: float = 0.05) -> list:
-        """Filters blocks that overlap with a specific time range.
+        """
+        Filter blocks that overlap with a specific time range.
 
-        Uses overlap logic (not strict containment) so that blocks whose
-        timestamps were shifted by standardize/merge across different
-        translation streams (S1, L1, Mt) are still captured.
-        A small margin (default 50ms) provides additional tolerance.
+        Uses overlap logic (not strict containment) so that blocks
+        whose timestamps were shifted by standardize/merge across
+        different translation streams (S1, L1, Mt) are still captured.
+
+        Parameters
+        ----------
+        blocks : list of dict
+            Parsed SRT blocks with ``start`` and ``end`` timestamps.
+        start_sec : float
+            Start of the target range in seconds.
+        end_sec : float
+            End of the target range in seconds.
+        margin : float, optional
+            Tolerance in seconds added to both boundaries
+            (default 0.05, i.e. 50 ms).
+
+        Returns
+        -------
+        list of dict
+            Blocks whose time span overlaps ``[start_sec, end_sec]``
+            (with *margin* tolerance).
+
+        Examples
+        --------
+        >>> blocks = [
+        ...     {"start": "00:00:01,000", "end": "00:00:03,000", "text": "A"},
+        ...     {"start": "00:00:05,000", "end": "00:00:07,000", "text": "B"},
+        ... ]
+        >>> result = SRTHandler.get_blocks_in_range(blocks, 0.0, 4.0)
+        >>> len(result)
+        1
+        >>> result[0]['text']
+        'A'
         """
         return [
             b for b in blocks

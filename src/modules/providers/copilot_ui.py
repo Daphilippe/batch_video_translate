@@ -10,12 +10,41 @@ from modules.providers.base_provider import LLMProvider
 logger = logging.getLogger(__name__)
 
 class CopilotUIProvider(LLMProvider):
+    """LLM provider using browser-based UI automation.
+
+    Interacts with an LLM running inside a browser window (e.g.
+    Copilot in Edge) by pasting prompts via the clipboard and
+    waiting for the human operator to copy the response back.
+
+    Parameters
+    ----------
+    window_title : str, optional
+        Substring to match against open window titles
+        (default ``"Edge"``).
+
+    Raises
+    ------
+    RuntimeError
+        If no window matching *window_title* is found.
+    """
+
     def __init__(self, window_title="Edge"):
         self.window_title = window_title
         self._find_window()
         self.name = "UI LLM translation"
 
     def _find_window(self):
+        """
+        Locate and focus the browser window for UI automation.
+
+        Scans all visible desktop windows for one whose title
+        contains ``self.window_title``, then brings it to focus.
+
+        Raises
+        ------
+        RuntimeError
+            If no matching window is found.
+        """
         windows = Desktop(backend="uia").windows()
         for w in windows:
             if self.window_title in w.window_text():
@@ -25,7 +54,13 @@ class CopilotUIProvider(LLMProvider):
         raise RuntimeError(f"Window containing '{self.window_title}' not found.")
 
     def _wait_for_click(self):
-        """Waits for a physical left click from the user."""
+        """
+        Block until the operator performs a physical left-click.
+
+        Polls ``win32api.GetKeyState`` at ~20 Hz until the left
+        mouse button state changes, signalling that the operator
+        has clicked inside the target input area.
+        """
         state_left = win32api.GetKeyState(0x01)
         while True:
             current_state = win32api.GetKeyState(0x01)
@@ -35,12 +70,25 @@ class CopilotUIProvider(LLMProvider):
 
     def ask(self, content: str, prompt: str) -> str:
         """
-        Implementation of the UI-based interaction.
+        Perform one operator-assisted LLM interaction.
 
-        Note: `content` (system instructions) is intentionally NOT re-sent each call.
-        In a browser-based session with a human operator, the context persists across
-        messages. The operator sets up the system prompt once at the start of the session.
-        Re-sending it every chunk would saturate the LLM's context window.
+        Copies *prompt* to the clipboard, waits for the operator
+        to click inside the browser input, pastes, waits for
+        generation, and reads the response from the clipboard.
+
+        Parameters
+        ----------
+        content : str
+            System instructions.  **Not re-sent** each call;
+            the operator sets up the system prompt once at the
+            start of the browser session.
+        prompt : str
+            SRT chunk to translate (copied to clipboard).
+
+        Returns
+        -------
+        str
+            The LLM response extracted from the clipboard.
         """
         # Only copy the SRT chunk to translate — system prompt is already in the conversation
         pyperclip.copy(prompt)

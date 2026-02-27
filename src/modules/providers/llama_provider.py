@@ -8,6 +8,17 @@ logger = logging.getLogger(__name__)
 
 
 class LlamaCPPProvider(LLMProvider):
+    """LLM provider that communicates with a local llama.cpp server.
+
+    Sends requests to the OpenAI-compatible
+    ``/v1/chat/completions`` endpoint exposed by llama.cpp.
+
+    Parameters
+    ----------
+    url : str, optional
+        Base URL of the llama.cpp server
+        (default ``"http://127.0.0.1:8080"``).
+    """
     def __init__(self, url: str = "http://127.0.0.1:8080"):
         # llama.cpp uses /v1/chat/completions for OpenAI compatibility
         self.url = f"{url}/v1/chat/completions"
@@ -16,9 +27,29 @@ class LlamaCPPProvider(LLMProvider):
 
     def ask(self, content: str, prompt: str) -> str:
         """
-        Sends the prompt to the local llama.cpp server.
-        Required by LLMTranslator via LLMProvider interface.
-        Raises LLMProviderError on failure.
+        Send a prompt to the local llama.cpp server.
+
+        Constructs a chat-completion payload with *content* as the
+        system message and *prompt* as the user message, then
+        posts it to the ``/v1/chat/completions`` endpoint.
+
+        Parameters
+        ----------
+        content : str
+            System-level instructions.
+        prompt : str
+            User-level prompt (e.g. SRT chunk to translate).
+
+        Returns
+        -------
+        str
+            The assistant's response text.
+
+        Raises
+        ------
+        LLMProviderError
+            On connection errors, empty responses, or unexpected
+            response formats.
         """
         payload = {
             "messages": [

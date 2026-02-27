@@ -8,10 +8,33 @@ from utils.file_handler import DirectoryMirrorTask
 logger = logging.getLogger(__name__)
 
 class AudioExtractor(DirectoryMirrorTask):
+    """Extract and segment audio tracks from video files using FFmpeg.
+
+    For each video, creates a subfolder of WAV chunks
+    (``part000.wav``, ``part001.wav``, …) ready for Whisper
+    transcription.  Existing segments are skipped automatically.
+    """
+
     def __init__(self, input_dir: str, output_dir: str, extensions: tuple = (".mp4", ".mkv"), segment_time: int = 600):
         """
-        Initializes the extractor with segmentation support.
-        :param segment_time: Duration of each audio chunk in seconds.
+        Initialize the extractor with segmentation support.
+
+        Parameters
+        ----------
+        input_dir : str
+            Directory containing source video files.
+        output_dir : str
+            Directory where audio segment folders are created.
+        extensions : tuple of str, optional
+            Video extensions to process
+            (default ``(".mp4", ".mkv")``).
+        segment_time : int, optional
+            Duration of each audio chunk in seconds (default 600).
+
+        Raises
+        ------
+        FileNotFoundError
+            If FFmpeg is not found in ``PATH``.
         """
         super().__init__(input_dir, output_dir, extensions)
         self.sample_rate = "16000"
@@ -23,7 +46,16 @@ class AudioExtractor(DirectoryMirrorTask):
 
     def process_file(self, input_file: Path):
         """
-        Segments the audio from a video file into multiple WAV chunks.
+        Segment audio from a single video file into WAV chunks.
+
+        Creates a dedicated subfolder mirroring the video name,
+        then invokes FFmpeg's ``segment`` muxer to produce
+        16 kHz mono WAV files of ``self.segment_time`` seconds each.
+
+        Parameters
+        ----------
+        input_file : Path
+            Path to the source video file.
         """
         # Create a specific directory for this video's segments
         # to avoid mixing chunks from different source files.
