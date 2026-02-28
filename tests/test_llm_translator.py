@@ -1,24 +1,6 @@
+from helpers import MockProvider
 from modules.llm_translator import LLMTranslator
-from modules.providers.base_provider import LLMProvider
 from modules.providers.llama_provider import LLMProviderError
-
-
-class MockProvider(LLMProvider):
-    """Test double for LLMProvider."""
-    def __init__(self, responses=None):
-        self.responses = responses or []
-        self.call_count = 0
-        self.name = "MockLLM"
-
-    def ask(self, content: str, prompt: str) -> str:
-        if self.call_count < len(self.responses):
-            resp = self.responses[self.call_count]
-            self.call_count += 1
-            if isinstance(resp, Exception):
-                raise resp
-            return resp
-        self.call_count += 1
-        return ""
 
 
 class TestLLMTranslatorLogic:
@@ -75,10 +57,12 @@ class TestLLMTranslatorLogic:
     def test_chunk_splitting(self, tmp_path):
         """Should split blocks into chunks of the configured size."""
         config = {"source_lang": "English", "target_lang": "French", "chunk_size": 2, "chunk_delay": 0}
-        provider = MockProvider(responses=[
-            "1\n00:00:01,000 --> 00:00:02,000\nX\n\n2\n00:00:03,000 --> 00:00:04,000\nY\n",
-            "3\n00:00:05,000 --> 00:00:06,000\nZ\n",
-        ])
+        provider = MockProvider(
+            responses=[
+                "1\n00:00:01,000 --> 00:00:02,000\nX\n\n2\n00:00:03,000 --> 00:00:04,000\nY\n",
+                "3\n00:00:05,000 --> 00:00:06,000\nZ\n",
+            ]
+        )
 
         translator = LLMTranslator(
             input_dir=str(tmp_path / "in"),
@@ -117,11 +101,13 @@ class TestCheckpointRecovery:
 
         (input_dir / "test.srt").write_text(SRT_3_BLOCKS, encoding="utf-8")
 
-        provider = MockProvider(responses=[
-            "1\n00:00:01,000 --> 00:00:02,000\nUn\n",
-            "2\n00:00:03,000 --> 00:00:04,000\nDeux\n",
-            "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
-        ])
+        provider = MockProvider(
+            responses=[
+                "1\n00:00:01,000 --> 00:00:02,000\nUn\n",
+                "2\n00:00:03,000 --> 00:00:04,000\nDeux\n",
+                "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
+            ]
+        )
         config = {"source_lang": "English", "target_lang": "French", "chunk_size": 1, "chunk_delay": 0}
         translator = LLMTranslator(str(input_dir), str(output_dir), provider, config)
 
@@ -142,11 +128,13 @@ class TestCheckpointRecovery:
         (input_dir / "test.srt").write_text(SRT_3_BLOCKS, encoding="utf-8")
 
         # Chunk 1 succeeds, chunk 2 raises a fatal error
-        provider = MockProvider(responses=[
-            "1\n00:00:01,000 --> 00:00:02,000\nUn\n",
-            RuntimeError("LLM crashed"),
-            "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
-        ])
+        provider = MockProvider(
+            responses=[
+                "1\n00:00:01,000 --> 00:00:02,000\nUn\n",
+                RuntimeError("LLM crashed"),
+                "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
+            ]
+        )
         config = {"source_lang": "English", "target_lang": "French", "chunk_size": 1, "chunk_delay": 0}
         translator = LLMTranslator(str(input_dir), str(output_dir), provider, config)
 
@@ -168,15 +156,15 @@ class TestCheckpointRecovery:
 
         # Simulate a checkpoint from a previous interrupted run (1 chunk done)
         checkpoint = output_dir / "test.partial.srt"
-        checkpoint.write_text(
-            "1\n00:00:01,000 --> 00:00:02,000\nUn\n", encoding="utf-8"
-        )
+        checkpoint.write_text("1\n00:00:01,000 --> 00:00:02,000\nUn\n", encoding="utf-8")
 
         # Provider only needs to handle chunks 2 and 3
-        provider = MockProvider(responses=[
-            "2\n00:00:03,000 --> 00:00:04,000\nDeux\n",
-            "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
-        ])
+        provider = MockProvider(
+            responses=[
+                "2\n00:00:03,000 --> 00:00:04,000\nDeux\n",
+                "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
+            ]
+        )
         config = {"source_lang": "English", "target_lang": "French", "chunk_size": 1, "chunk_delay": 0}
         translator = LLMTranslator(str(input_dir), str(output_dir), provider, config)
 
@@ -203,11 +191,13 @@ class TestCheckpointRecovery:
         checkpoint = output_dir / "test.partial.srt"
         checkpoint.write_text("NOT VALID SRT {{{{", encoding="utf-8")
 
-        provider = MockProvider(responses=[
-            "1\n00:00:01,000 --> 00:00:02,000\nUn\n",
-            "2\n00:00:03,000 --> 00:00:04,000\nDeux\n",
-            "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
-        ])
+        provider = MockProvider(
+            responses=[
+                "1\n00:00:01,000 --> 00:00:02,000\nUn\n",
+                "2\n00:00:03,000 --> 00:00:04,000\nDeux\n",
+                "3\n00:00:05,000 --> 00:00:06,000\nTrois\n",
+            ]
+        )
         config = {"source_lang": "English", "target_lang": "French", "chunk_size": 1, "chunk_delay": 0}
         translator = LLMTranslator(str(input_dir), str(output_dir), provider, config)
 

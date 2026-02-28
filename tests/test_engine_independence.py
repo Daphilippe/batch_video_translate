@@ -13,7 +13,6 @@ import pytest
 
 from modules.legacy_translator import LegacyTranslator
 from modules.llm_translator import LLMTranslator
-from modules.providers.base_provider import LLMProvider
 from modules.providers.llama_provider import LlamaCPPProvider
 
 # ---------------------------------------------------------------------------
@@ -54,16 +53,6 @@ def _write_config(tmp_path, config_dict):
     config_path = tmp_path / "settings.json"
     config_path.write_text(json.dumps(config_dict), encoding="utf-8")
     return str(config_path)
-
-
-class MockProvider(LLMProvider):
-    """Minimal mock for LLM provider."""
-
-    def __init__(self):
-        self.name = "MockLLM"
-
-    def ask(self, content: str, prompt: str) -> str:
-        return prompt  # echo back
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +229,7 @@ class TestLegacyEngineIndependence:
     @patch("modules.legacy_translator.GoogleTranslator")
     def test_creates_with_translation_config_only(self, mock_gt, tmp_path):
         """LegacyTranslator works with just the 'translation' section."""
-        translator = LegacyTranslator(
-            str(tmp_path / "in"), str(tmp_path / "out"), LEGACY_ONLY_CONFIG
-        )
+        translator = LegacyTranslator(str(tmp_path / "in"), str(tmp_path / "out"), LEGACY_ONLY_CONFIG)
         assert translator.name == "Legacy translation"
         mock_gt.assert_called_once_with(source="en", target="fr")
 
@@ -373,15 +360,9 @@ class TestCreateTranslator:
 # Promote to final (standalone engine → subtitles_ready/)
 # ---------------------------------------------------------------------------
 
-S1_CONTENT = (
-    "1\n00:00:01,000 --> 00:00:03,000\nHello\n\n"
-    "2\n00:00:04,000 --> 00:00:06,000\nWorld\n"
-)
+S1_CONTENT = "1\n00:00:01,000 --> 00:00:03,000\nHello\n\n2\n00:00:04,000 --> 00:00:06,000\nWorld\n"
 
-TRANSLATED_CONTENT = (
-    "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n\n"
-    "2\n00:00:04,000 --> 00:00:06,000\nMonde\n"
-)
+TRANSLATED_CONTENT = "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n\n2\n00:00:04,000 --> 00:00:06,000\nMonde\n"
 
 
 class TestPromoteToFinal:

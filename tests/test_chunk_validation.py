@@ -7,33 +7,11 @@ differs from the source.  If the output is identical to the source
 
 from unittest.mock import MagicMock, patch
 
+from helpers import MockProvider
 from modules.legacy_translator import LegacyTranslator
 from modules.llm_translator import LLMTranslator
-from modules.providers.base_provider import LLMProvider
 from modules.strategies.hybrid_refiner import HybridRefiner
 from modules.translator import BaseTranslator
-
-# ── Mock provider ────────────────────────────────────────────────────
-
-
-class MockProvider(LLMProvider):
-    """Test double that returns pre-configured responses in order."""
-
-    def __init__(self, responses=None):
-        self.responses = list(responses or [])
-        self.call_count = 0
-        self.name = "MockLLM"
-
-    def ask(self, content: str, prompt: str) -> str:
-        if self.call_count < len(self.responses):
-            resp = self.responses[self.call_count]
-            self.call_count += 1
-            if isinstance(resp, Exception):
-                raise resp
-            return resp
-        self.call_count += 1
-        return ""
-
 
 # ── BaseTranslator._is_chunk_untranslated ────────────────────────────
 
@@ -177,8 +155,8 @@ class TestLegacyBatchRetry:
 
         # First batch returns source text ("Hello"); retry returns translation
         mock_instance.translate.side_effect = [
-            "Hello",       # First batch: returns source (untranslated)
-            "Bonjour",     # Retry: returns translation
+            "Hello",  # First batch: returns source (untranslated)
+            "Bonjour",  # Retry: returns translation
         ]
 
         config = {
@@ -236,8 +214,8 @@ class TestLegacyBatchRetry:
 
         # Both calls return source text — retry gives up gracefully
         mock_instance.translate.side_effect = [
-            "Hello",   # First batch: source text
-            "Hello",   # Retry: still source text
+            "Hello",  # First batch: source text
+            "Hello",  # Retry: still source text
         ]
 
         config = {

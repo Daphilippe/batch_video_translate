@@ -10,7 +10,7 @@ requires-python = ">=3.9"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 
 # ── Ruff ────────────────────────────────────────────────────────────
 [tool.ruff]

@@ -1,29 +1,6 @@
-from modules.providers.base_provider import LLMProvider
+from helpers import MockProvider
 from modules.strategies.hybrid_refiner import HybridRefiner
 from utils.srt_handler import SRTHandler
-
-# --- Mock provider ---
-
-class MockProvider(LLMProvider):
-    """Test double for LLMProvider used by HybridRefiner."""
-
-    def __init__(self, responses=None):
-        self.responses = responses or []
-        self.call_count = 0
-        self.prompts = []
-        self.name = "MockLLM"
-
-    def ask(self, content: str, prompt: str) -> str:
-        self.prompts.append(prompt)
-        if self.call_count < len(self.responses):
-            resp = self.responses[self.call_count]
-            self.call_count += 1
-            if isinstance(resp, Exception):
-                raise resp
-            return resp
-        self.call_count += 1
-        return ""
-
 
 # --- Sample SRT data ---
 
@@ -254,7 +231,7 @@ class TestForceAlignToS1:
         result = HybridRefiner._force_align_to_s1(s1, refined)
         assert len(result) == 3
         assert result[0]["text"] == "x"
-        assert result[1]["text"] == "b"   # fallback to S1
+        assert result[1]["text"] == "b"  # fallback to S1
         assert result[2]["text"] == "c"
 
     def test_exact_match_unchanged(self):
@@ -485,3 +462,129 @@ class TestBlockText:
 
     def test_missing_text_key(self):
         assert HybridRefiner._block_text({}) == ""
+
+
+# ── process_file (file-level orchestration) ──────────────────────────
+
+
+class TestHybridRefinerProcessFile:
+    """Integration tests for HybridRefiner.process_file."""
+
+    def _setup_dirs(self, tmp_path):
+        """Create all four required directories."""
+        s1_dir = tmp_path / "s1"
+        l1_dir = tmp_path / "l1"
+        mt_dir = tmp_path / "mt"
+        out_dir = tmp_path / "out"
+        for d in (s1_dir, l1_dir, mt_dir, out_dir):
+            d.mkdir()
+        return s1_dir, l1_dir, mt_dir, out_dir
+
+    def test_process_file_full_refinement(self, tmp_path):
+        """process_file reads S1/L1/Mt, calls refine_logic, writes output."""
+        s1_dir, l1_dir, mt_dir, out_dir = self._setup_dirs(tmp_path)
+
+        (s1_dir / "video.srt").write_text(S1_SRT, encoding="utf-8")
+        (l1_dir / "video.srt").write_text(L1_SRT, encoding="utf-8")
+        (mt_dir / "video.srt").write_text(MT_SRT, encoding="utf-8")
+
+        response_srt = (
+            "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n\n"
+            "2\n00:00:04,000 --> 00:00:06,000\nTest\n\n"
+            "3\n00:00:07,000 --> 00:00:09,000\nSalut\n"
+        )
+        provider = MockProvider(responses=[response_srt])
+
+        config = {"chunk_size": 10, "chunk_delay": 0, "refinement_protocol_file": "nonexistent.txt"}
+        refiner = HybridRefiner(
+            str(s1_dir),
+            str(l1_dir),
+            str(mt_dir),
+            str(out_dir),
+            provider,
+            config,
+        )
+        refiner.process_file(s1_dir / "video.srt")
+
+        output = out_dir / "video.srt"
+        assert output.exists()
+        content = output.read_text(encoding="utf-8")
+        assert "Bonjour" in content
+
+    def test_process_file_missing_l1_skips(self, tmp_path):
+        """process_file returns early when L1 file is missing."""
+        s1_dir, l1_dir, mt_dir, out_dir = self._setup_dirs(tmp_path)
+
+        (s1_dir / "video.srt").write_text(S1_SRT, encoding="utf-8")
+        (mt_dir / "video.srt").write_text(MT_SRT, encoding="utf-8")
+        # L1 missing intentionally
+
+        provider = MockProvider()
+        config = {"chunk_size": 10, "chunk_delay": 0}
+        refiner = HybridRefiner(
+            str(s1_dir),
+            str(l1_dir),
+            str(mt_dir),
+            str(out_dir),
+            provider,
+            config,
+        )
+        refiner.process_file(s1_dir / "video.srt")
+
+        # No output should be written
+        assert not (out_dir / "video.srt").exists()
+        assert provider.call_count == 0
+
+    def test_process_file_incremental_skip(self, tmp_path):
+        """process_file skips write when existing output is fully translated."""
+        s1_dir, l1_dir, mt_dir, out_dir = self._setup_dirs(tmp_path)
+
+        (s1_dir / "video.srt").write_text(S1_SRT, encoding="utf-8")
+        (l1_dir / "video.srt").write_text(L1_SRT, encoding="utf-8")
+        (mt_dir / "video.srt").write_text(MT_SRT, encoding="utf-8")
+        # Pre-existing output that is fully translated
+        (out_dir / "video.srt").write_text(L1_SRT, encoding="utf-8")
+
+        provider = MockProvider()
+        config = {"chunk_size": 10, "chunk_delay": 0, "refinement_protocol_file": "nonexistent.txt"}
+        refiner = HybridRefiner(
+            str(s1_dir),
+            str(l1_dir),
+            str(mt_dir),
+            str(out_dir),
+            provider,
+            config,
+        )
+        refiner.process_file(s1_dir / "video.srt")
+
+        # No LLM calls — output already good
+        assert provider.call_count == 0
+
+
+# ── _log_alignment_quality ───────────────────────────────────────────
+
+
+class TestLogAlignmentQuality:
+    """Diagnostics logging for alignment stats."""
+
+    def test_perfect_alignment_logged(self, tmp_path):
+        """100% alignment logs info-level message."""
+        refiner = _make_refiner(MockProvider())
+        s1 = SRTHandler.parse_to_blocks(S1_SRT)
+        l1 = SRTHandler.parse_to_blocks(L1_SRT)
+        alignment = refiner._build_alignment_map(s1, l1)
+
+        # Should not raise — just verifies the code path runs
+        refiner._log_alignment_quality("L1", s1, alignment)
+
+    def test_partial_alignment_logged(self, tmp_path):
+        """Partial alignment logs warning with unmatched indices."""
+        refiner = _make_refiner(MockProvider())
+        s1 = SRTHandler.parse_to_blocks(S1_SRT)
+        # Empty map = 0% alignment
+        refiner._log_alignment_quality("L1", s1, {})
+
+    def test_empty_s1_no_crash(self, tmp_path):
+        """Empty S1 blocks don't crash the logging."""
+        refiner = _make_refiner(MockProvider())
+        refiner._log_alignment_quality("L1", [], {})

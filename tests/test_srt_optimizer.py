@@ -55,6 +55,7 @@ class TestSRTOptimizerProcessFile:
 
         # Run again — output should be skipped (not rewritten)
         import time
+
         time.sleep(0.05)
         optimizer.run()
 

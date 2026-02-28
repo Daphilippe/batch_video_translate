@@ -89,6 +89,7 @@ class TestCacheManagement:
         translator.save_cache()
 
         import json
+
         with open(tmp_path / "cache.json", encoding="utf-8") as f:
             data = json.load(f)
         assert data == {"key1": "val1"}
