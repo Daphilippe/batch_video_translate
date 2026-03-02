@@ -1,6 +1,6 @@
 from helpers import MockProvider
 from modules.llm_translator import LLMTranslator
-from modules.providers.llama_provider import LLMProviderError
+from modules.providers.base_provider import LLMProviderError
 
 
 class TestLLMTranslatorLogic:
@@ -231,3 +231,66 @@ class TestCheckpointRecovery:
 
         # No LLM calls — file was fully skipped
         assert provider.call_count == 0
+
+
+# ── Chunk retry on untranslated output ───────────────────────────────
+
+
+class TestLLMChunkRetry:
+    """LLMTranslator retries chunks that appear untranslated."""
+
+    def _make_translator(self, tmp_path, provider, max_retries=2):
+        config = {
+            "source_lang": "English",
+            "target_lang": "French",
+            "chunk_size": 50,
+            "chunk_delay": 0,
+            "max_chunk_retries": max_retries,
+        }
+        return LLMTranslator(
+            input_dir=str(tmp_path / "in"),
+            output_dir=str(tmp_path / "out"),
+            provider=provider,
+            config=config,
+        )
+
+    def test_retry_on_identical_output(self, tmp_path):
+        """When LLM returns source text, chunk is retried."""
+        source_srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        translated_srt = "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n"
+        provider = MockProvider(responses=[source_srt, translated_srt])
+        translator = self._make_translator(tmp_path, provider)
+
+        result = translator.translate_logic(source_srt)
+        assert "Bonjour" in result
+        assert provider.call_count == 2  # 1 initial + 1 retry
+
+    def test_gives_up_after_max_retries(self, tmp_path):
+        """After max_chunk_retries, falls back to source text."""
+        source_srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        provider = MockProvider(responses=[source_srt, source_srt, source_srt])
+        translator = self._make_translator(tmp_path, provider, max_retries=2)
+
+        result = translator.translate_logic(source_srt)
+        assert "Hello" in result  # Falls back to source
+        assert provider.call_count == 3  # 1 initial + 2 retries
+
+    def test_no_retry_when_translated(self, tmp_path):
+        """No retry when translation differs from source."""
+        source_srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        translated_srt = "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n"
+        provider = MockProvider(responses=[translated_srt])
+        translator = self._make_translator(tmp_path, provider)
+
+        result = translator.translate_logic(source_srt)
+        assert "Bonjour" in result
+        assert provider.call_count == 1  # No retry needed
+
+    def test_max_retries_configurable(self, tmp_path):
+        """max_chunk_retries config controls retry limit."""
+        source_srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        provider = MockProvider(responses=[source_srt, source_srt])
+        translator = self._make_translator(tmp_path, provider, max_retries=1)
+
+        translator.translate_logic(source_srt)
+        assert provider.call_count == 2  # 1 initial + 1 retry (max_retries=1)

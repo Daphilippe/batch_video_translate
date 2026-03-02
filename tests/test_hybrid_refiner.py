@@ -581,3 +581,89 @@ class TestLogAlignmentQuality:
         """Empty S1 blocks don't crash the logging."""
         refiner = _make_refiner(MockProvider())
         refiner._log_alignment_quality("L1", [], {})
+
+
+# ── Window retry on untranslated output ──────────────────────────────
+
+
+class TestHybridWindowRetry:
+    """HybridRefiner._refine_window retries when output matches source."""
+
+    def _make_refiner(self, tmp_path, provider):
+        config = {"chunk_size": 10, "chunk_delay": 0}
+        return HybridRefiner(
+            source_dirs={"s1": str(tmp_path / "s1"), "l1": str(tmp_path / "l1"), "mt": str(tmp_path / "mt")},
+            output_dir=str(tmp_path / "out"),
+            provider=provider,
+            config=config,
+        )
+
+    def test_retry_on_identical_window(self, tmp_path):
+        """When LLM returns S1 text, window is retried once."""
+        source_srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        translated_srt = "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n"
+        provider = MockProvider(responses=[source_srt, translated_srt])
+        refiner = self._make_refiner(tmp_path, provider)
+        refiner._active_protocol = "system"
+
+        s1_win = [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": ["Hello"]}]
+        result = refiner._refine_window(s1_win, [0], {"l1": {}, "mt": {}})
+
+        assert result is not None
+        assert result[0]["text"] == ["Bonjour"]
+        assert provider.call_count == 2
+
+    def test_gives_up_after_two_attempts(self, tmp_path):
+        """After 2 failed attempts, returns S1 source blocks."""
+        source_srt = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        provider = MockProvider(responses=[source_srt, source_srt])
+        refiner = self._make_refiner(tmp_path, provider)
+        refiner._active_protocol = "system"
+
+        s1_win = [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": ["Hello"]}]
+        result = refiner._refine_window(s1_win, [0], {"l1": {}, "mt": {}})
+
+        assert result[0]["text"] == ["Hello"]
+        assert provider.call_count == 2
+
+    def test_no_retry_when_translated(self, tmp_path):
+        """No retry when refinement differs from source."""
+        translated_srt = "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n"
+        provider = MockProvider(responses=[translated_srt])
+        refiner = self._make_refiner(tmp_path, provider)
+        refiner._active_protocol = "system"
+
+        s1_win = [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": ["Hello"]}]
+        result = refiner._refine_window(s1_win, [0], {"l1": {}, "mt": {}})
+
+        assert result is not None
+        assert result[0]["text"] == ["Bonjour"]
+        assert provider.call_count == 1
+
+    def test_enforces_s1_timestamps(self, tmp_path):
+        """Refined blocks always get S1 timestamps."""
+        translated_srt = "1\n00:00:10,000 --> 00:00:12,000\nBonjour\n"
+        provider = MockProvider(responses=[translated_srt])
+        refiner = self._make_refiner(tmp_path, provider)
+        refiner._active_protocol = "system"
+
+        s1_win = [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": ["Hello"]}]
+        result = refiner._refine_window(s1_win, [0], {"l1": {}, "mt": {}})
+
+        assert result is not None
+        assert result[0]["start"] == "00:00:01,000"
+        assert result[0]["end"] == "00:00:03,000"
+
+    def test_empty_response_triggers_retry(self, tmp_path):
+        """Empty LLM response triggers a retry."""
+        translated_srt = "1\n00:00:01,000 --> 00:00:03,000\nBonjour\n"
+        provider = MockProvider(responses=["", translated_srt])
+        refiner = self._make_refiner(tmp_path, provider)
+        refiner._active_protocol = "system"
+
+        s1_win = [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": ["Hello"]}]
+        result = refiner._refine_window(s1_win, [0], {"l1": {}, "mt": {}})
+
+        assert result is not None
+        assert result[0]["text"] == ["Bonjour"]
+        assert provider.call_count == 2

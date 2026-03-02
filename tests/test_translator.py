@@ -198,3 +198,62 @@ class TestTranslateLogicAbstract:
         translator = BaseTranslator(str(tmp_path / "in"), str(tmp_path / "out"))
         with pytest.raises(NotImplementedError):
             translator.translate_logic("1\n00:00:01,000 --> 00:00:03,000\nHello\n")
+
+# ── _is_chunk_untranslated ───────────────────────────────────────────
+
+
+class TestIsChunkUntranslated:
+    """Unit tests for the static validation helper on BaseTranslator."""
+
+    def test_empty_translated_blocks(self):
+        """Empty translation list → untranslated."""
+        src = [{"text": ["Hello"]}]
+        assert BaseTranslator._is_chunk_untranslated(src, []) is True
+
+    def test_identical_text_is_untranslated(self):
+        """Same text in source and translation → untranslated."""
+        src = [{"text": ["Hello"]}, {"text": ["World"]}]
+        tgt = [{"text": ["Hello"]}, {"text": ["World"]}]
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is True
+
+    def test_different_text_is_translated(self):
+        """Different text → properly translated."""
+        src = [{"text": ["Hello"]}, {"text": ["World"]}]
+        tgt = [{"text": ["Bonjour"]}, {"text": ["Monde"]}]
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is False
+
+    def test_case_insensitive_comparison(self):
+        """Identity check is case-insensitive."""
+        src = [{"text": ["HELLO"]}]
+        tgt = [{"text": ["hello"]}]
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is True
+
+    def test_majority_rule_under_threshold(self):
+        """If less than half identical → considered translated."""
+        src = [{"text": ["A"]}, {"text": ["B"]}, {"text": ["C"]}]
+        tgt = [{"text": ["A"]}, {"text": ["Y"]}, {"text": ["Z"]}]
+        # 1/3 identical = 33% < 50% → translated
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is False
+
+    def test_majority_rule_over_threshold(self):
+        """If more than half identical → considered untranslated."""
+        src = [{"text": ["A"]}, {"text": ["B"]}, {"text": ["C"]}]
+        tgt = [{"text": ["A"]}, {"text": ["B"]}, {"text": ["Z"]}]
+        # 2/3 identical = 67% > 50% → untranslated
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is True
+
+    def test_text_as_string(self):
+        """Handles text stored as str (after merge) instead of list."""
+        src = [{"text": "Hello"}]
+        tgt = [{"text": "Bonjour"}]
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is False
+
+    def test_mixed_text_types(self):
+        """Handles mix of list and str text fields."""
+        src = [{"text": ["Hello"]}, {"text": "World"}]
+        tgt = [{"text": "Bonjour"}, {"text": ["Monde"]}]
+        assert BaseTranslator._is_chunk_untranslated(src, tgt) is False
+
+    def test_both_empty_blocks(self):
+        """Two empty block lists → untranslated."""
+        assert BaseTranslator._is_chunk_untranslated([], []) is True

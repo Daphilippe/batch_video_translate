@@ -197,3 +197,99 @@ class TestTranslateLogic:
         result = translator.translate_logic(SIMPLE_SRT)
 
         assert "..." in result
+
+
+# ── Batch retry on untranslated output ───────────────────────────────
+
+
+class TestLegacyBatchRetry:
+    """LegacyTranslator retries lines that appear untranslated."""
+
+    @patch("modules.legacy_translator.time.sleep")
+    @patch("modules.legacy_translator.GoogleTranslator")
+    def test_retry_untranslated_lines(self, mock_gt_class, _mock_sleep, tmp_path):
+        """Lines identical to source after batch are retried."""
+        mock_instance = MagicMock()
+        mock_gt_class.return_value = mock_instance
+
+        mock_instance.translate.side_effect = [
+            "Hello",  # First batch: returns source (untranslated)
+            "Bonjour",  # Retry: returns translation
+        ]
+
+        config = {
+            "translation": {
+                "source_lang": "en",
+                "target_lang": "fr",
+                "cache_file": str(tmp_path / "cache.json"),
+                "max_chars_batch": 5000,
+            }
+        }
+        translator = LegacyTranslator(
+            input_dir=str(tmp_path / "in"),
+            output_dir=str(tmp_path / "out"),
+            config=config,
+        )
+
+        source = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        result = translator.translate_logic(source)
+        assert "Bonjour" in result
+        assert mock_instance.translate.call_count == 2
+
+    @patch("modules.legacy_translator.time.sleep")
+    @patch("modules.legacy_translator.GoogleTranslator")
+    def test_no_retry_when_translated(self, mock_gt_class, _mock_sleep, tmp_path):
+        """No retry when all lines differ from source."""
+        mock_instance = MagicMock()
+        mock_gt_class.return_value = mock_instance
+        mock_instance.translate.return_value = "Bonjour"
+
+        config = {
+            "translation": {
+                "source_lang": "en",
+                "target_lang": "fr",
+                "cache_file": str(tmp_path / "cache.json"),
+                "max_chars_batch": 5000,
+            }
+        }
+        translator = LegacyTranslator(
+            input_dir=str(tmp_path / "in"),
+            output_dir=str(tmp_path / "out"),
+            config=config,
+        )
+
+        source = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        result = translator.translate_logic(source)
+        assert "Bonjour" in result
+        assert mock_instance.translate.call_count == 1  # No retry
+
+    @patch("modules.legacy_translator.time.sleep")
+    @patch("modules.legacy_translator.GoogleTranslator")
+    def test_retry_accepts_second_attempt(self, mock_gt_class, _mock_sleep, tmp_path):
+        """If retry still returns source, result is kept (no infinite loop)."""
+        mock_instance = MagicMock()
+        mock_gt_class.return_value = mock_instance
+
+        mock_instance.translate.side_effect = [
+            "Hello",  # First batch: source text
+            "Hello",  # Retry: still source text
+        ]
+
+        config = {
+            "translation": {
+                "source_lang": "en",
+                "target_lang": "fr",
+                "cache_file": str(tmp_path / "cache.json"),
+                "max_chars_batch": 5000,
+            }
+        }
+        translator = LegacyTranslator(
+            input_dir=str(tmp_path / "in"),
+            output_dir=str(tmp_path / "out"),
+            config=config,
+        )
+
+        source = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+        result = translator.translate_logic(source)
+        assert "Hello" in result
+        assert mock_instance.translate.call_count == 2
